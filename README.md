@@ -1,55 +1,122 @@
 # QuestNotes
 
-A desktop app for designing branching quests in story terms. Quest designers work with quests, characters, factions,
-districts, acts, thresholds, leak channels and mysteries, not with engine data. A master map shows every quest by act and
-questline, each card opens a detailed page, and tables cover thresholds and the cast. A light link to the game's quest
-system shows which quests exist in the engine and opens them there. Quests are ported into the engine by hand;
-QuestNotes never writes to the game project.
+A desktop app for designing branching quests in story terms. Quest designers work with quests, the people who give
+them, the places and factions they touch and what they reveal, not with engine data. A master map shows every quest by
+act and questline, each card opens a detailed page, and tables cover the cast and anything else the project tracks. A
+light link to the game's quest system shows which quests exist in the engine and opens them there. Quests are ported
+into the engine by hand; QuestNotes never writes to the game project.
 
 ## Use
 
 - **Map.** Acts and their sub-sections are columns, questlines are rows; a card's cell is its act and questline. Drag a
-  card to move it, drag from its right edge to another card to add *Leads to* or a *Pays off* link from a branching row,
+  card to move it, drag from its right edge to another card to add *Leads to* or a *Pays off* link from a branch row,
   drop on empty canvas to create a connected quest, double-click empty canvas to add one. Quests with no act wait in the
-  Hooks tray. Zooming out shrinks cards to their IDs. Click any chip to filter; nothing moves when you filter.
+  Hooks tray. Zooming out shrinks cards to their codes. Click any chip to filter; nothing moves when you filter.
 - **Pages** open beside the map (Space) or full (Enter). In the text, `@` or `[[` links a page and `/` inserts a
   heading, list or table. Everything saves as you go; deleted pages go to the Trash.
-- **Threshold ledger, Cast matrix, Handoff, Issues** are in the sidebar. `Ctrl K` finds any page or command; `?` lists
-  the shortcuts.
-- **Engine link.** In Settings choose the game folder: QuestNotes reads the quest files under `resources/quests` and
-  shows on every quest whether it exists in the engine. A quest marked *Ready for engine* with no engine quest gets an
-  amber flag and appears under Handoff with a brief for whoever builds it. Opening a quest in the engine needs the
-  bridge addon (below).
+- **Cast, Handoff, Issues** and the project's own matrix are in the sidebar. `Ctrl K` finds any page or command; `?`
+  lists the shortcuts.
+- **Engine link.** When the project names an engine, choose the game folder in Settings: QuestNotes reads the engine's
+  quest files and shows on every quest whether it exists there. A quest marked *Ready for engine* with no engine quest
+  gets an amber flag and appears under Handoff with a brief for whoever builds it.
 - **Sync** shares the lore folder through git: one button commits, fetches, merges and pushes. Edits to different lines
   merge on their own; edits to the same line come back to choose.
 
-A new project can start from existing design documents (`.docx`): quest entries, character profiles, the world's
-districts, factions and mysteries, and the act structure. The import lists what it could not decide, such as name clashes
-or places one document lacks, under Issues.
+## Projects
+
+`questnotes.yaml` at the root of the lore folder describes the project. Edit it under Settings › Project settings, or
+by hand. Everything is optional:
+
+```yaml
+name: Harbor Tales
+kinds:                       # page kinds besides quests, questlines and acts
+  - {id: character, label: Character, prefix: ch, color: "#a0607a"}
+  - {id: faction, label: Faction, prefix: fa}
+fields:                      # the fields of each kind
+  quest:
+    - {key: giver, label: Quest giver, kind: rows, to: [character], extras: [note], giver: true, required: true, glyph: G}
+    - {key: factions, label: Faction standing, kind: rows, to: [faction], extras: [{key: direction, options: [up, down]}], effect: true}
+template: {quest: "## Description\n\n## Branches\n\n| Condition | Outcome | Pays off in |\n| --- | --- | --- |\n|  |  |  |\n"}
+required_sections: [Description, Branches]
+branches: Branches           # the heading whose table holds branch rows
+matrix: {kind: faction, field: factions, title: Faction ledger}
+engine: {preset: animus}
+import: []                   # import jobs; see below
+```
+
+Without `kinds` and `fields` a project gets characters, factions, locations and secrets. Field kinds are `text`,
+`long`, `select`, `ref`, `rows`, `tags` and `number`. A `rows` field is a list of page links or free text, each with
+the qualifiers named in `extras`. `giver: true` marks the field that says who gives a quest (the cast matrix lists
+that kind; Handoff checks it), `effect: true` files a field under Effects and in the brief's "No engine field yet",
+`glyph` is the letter the cast matrix shows. `matrix` adds a table of quests against the pages of one kind.
+
+### Engine link
+
+`engine` describes where the game keeps quests. A preset fills it in; any key given next to `preset` overrides it.
+
+```yaml
+engine:
+  name: Our engine
+  quests:
+    files: data/quests/**/*.json   # quest files, relative to the game folder
+    id: quest_id                   # keys inside each file; dotted paths work
+    title: title
+    kind: kind
+    stages: stages
+    stage_id: id
+    kinds: [main, side]
+    new_path: res://data/quests/{kind}/{id}.json   # shown in the handoff brief
+  characters: {files: "npc/**/*.tres", id_pattern: 'character_id\s*=\s*"([^"]+)"'}
+  res_prefix: res://               # Godot projects: opens quests in the editor through the bridge
+  adapter: ""                      # bridge adapter for engines with their own editor screen
+```
+
+The `animus` preset reads Animus quest JSON and opens quests on the Animus screen. Each scan is also written to
+`engine/index.yaml` in the lore folder, so writers without the game project still see engine state.
+
+### Import
+
+A project can start from design documents (`.docx`). The import dialog shows each document's headings and a list of
+import jobs, prefilled from the project's saved jobs or guessed from file names and quest codes:
+
+```yaml
+- {file: World, kind: location, level: 3, under: Places}
+- {file: People, kind: character, level: 2, group: {field: home}, hooks: "[QUEST HOOK]"}
+- {file: Story, kind: act, pattern: '^Act (?<order>[IVX]+) — (?<title>[^.]+)\.'}
+- {file: Quests, kind: quest, level: 1, match: '^[A-Z]+\d+ —', create: [character]}
+```
+
+Each heading at `level` (below `under`, matching `match`, not matching `skip`) becomes a page of `kind`. Paragraphs of
+the form `Label: value` fill the field with that label (or one of its `aliases`). Names in `rows` values become links;
+`create` makes pages for names that have none yet. `group` fills a field from the parent heading, `set` gives fixed
+values, `hooks` turns paragraphs with that prefix into Idea quests, and `pattern` makes pages from paragraphs, with
+named groups `title`, `order`, `body` or `list`. Whatever the import cannot decide, such as name clashes, goes to
+Issues. The jobs are saved in `questnotes.yaml` for the next import.
 
 ## The lore folder
 
 One Markdown file per page with a YAML header, in its own git repository, separate from the game:
 
 ```
-questnotes.yaml        project name
-quests/ questlines/ acts/ characters/ factions/ districts/ thresholds/ leaks/ mysteries/
+questnotes.yaml        project settings
+quests/ questlines/ acts/ and one folder per kind (characters/, factions/, …)
 views/map.yaml         order of cards inside each map cell
 views/issues.yaml      import issues not yet settled
-engine/animus-index.yaml   last scan of the engine, for writers without the game project
+engine/index.yaml      last scan of the engine
 trash/
 ```
 
 Only QuestNotes writes the YAML headers, so they stay canonical and diff cleanly. Links are `[[page_id]]`.
 
-## Opening quests in the engine
+## Opening quests in Godot
 
-The engine side is a Godot editor plugin that edits quest JSON files. Copy `bridge/addons/questnotes_bridge` into the
-game project's `addons/` and enable *QuestNotes Bridge* under Project Settings › Plugins. It listens on 127.0.0.1 only,
-requires the token it writes to the ignored `.godot/questnotes_bridge.json`, and hands the quest to the editor's own
-file handler. It changes nothing else in the project. When Godot is closed, QuestNotes starts it
-(`godot -e --path <game> ++ --questnotes-open=<quest>#<stage>`); set the Godot executable in Settings if it is not on
-`PATH`.
+For Godot projects, copy `bridge/addons/questnotes_bridge` into the game project's `addons/` and enable *QuestNotes
+Bridge* under Project Settings › Plugins. It listens on 127.0.0.1 only, requires the token it writes to the ignored
+`.godot/questnotes_bridge.json`, and changes nothing in the project. Without an adapter it opens the quest file in the
+inspector; an adapter (`adapters/<name>.gd`, a static `open(path, stage)`) opens it in a quest system's own screen.
+`adapters/animus.gd` is the one for Animus. When Godot is closed, QuestNotes starts it
+(`godot -e --path <game> ++ --questnotes-open=<quest>#<stage> --questnotes-adapter=<name>`); set the Godot executable
+in Settings if it is not on `PATH`.
 
 ## Develop
 
@@ -60,9 +127,11 @@ npm run typecheck
 npm test             # unit tests; the bridge test runs when Godot 4.7 is on PATH or in $GODOT
 npm run test:e2e     # builds, then drives the app headless; QUESTNOTES_SHOTS=<dir> keeps screenshots
 npm run dist         # installers in release/ (AppImage, NSIS or DMG for the current OS)
+npm run install:linux   # builds, installs to ~/.local/opt/questnotes and adds an application-menu entry
 ```
 
-Tests use small synthetic design documents, or the documents in `$QUESTNOTES_DOCS` when it is set. Set
+Tests use small synthetic design documents. Set `QUESTNOTES_DOCS` to a folder of real documents and
+`QUESTNOTES_CONFIG` to a `questnotes.yaml` whose import jobs read them, to test against those too. Set
 `QUESTNOTES_UPDATE_URL` when running `npm run dist` to enable auto-update from a folder of published builds. CI
 (`.github/workflows/ci.yml`) runs every test with headless Godot, and builds installers for all three systems on `v*`
 tags; a Mac build needs signing to open without warnings and to auto-update.

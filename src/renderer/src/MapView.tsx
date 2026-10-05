@@ -8,9 +8,10 @@ import '@xyflow/react/dist/style.css'
 import { useStore, setData, update, peek, openFull, createPage, writeMap, toast, toggleFilter } from './store'
 import { byType, label, roman, type Pages } from './derive'
 import { addPayoff, branches, refsOf, type Data } from '../../shared/page'
-import { questState, type EngineIndex } from '../../shared/engine'
+import { questState, stateLabel, type EngineIndex } from '../../shared/engine'
+import { kindStyle } from './ui'
 import type { MapView as MapData } from '../../shared/api'
-import type { Row } from '../../shared/schema'
+import type { Row, Schema } from '../../shared/schema'
 
 const CW = 270, CARD_W = 230, CARD_H = 116, GAP = 14, PAD = 18, BAND_H = CARD_H + PAD * 2
 interface Col { act: string; sub: string; label: string; actLabel: string; first: boolean }
@@ -65,25 +66,26 @@ function cellAt(L: Layout, x: number, y: number) {
 const TONE: Record<string, string> = { idea: '#b9b2a4', outline: '#8fa8b8', draft: '#c4a35a', review: '#8a6fb0', ready: '#4f8a4a', cut: '#999' }
 
 function QuestCard({ data }: NodeProps<Node<{ id: string; dim: boolean }>>) {
-  const { pages, engine, selected } = useStore()
+  const { pages, engine, selected, schema } = useStore()
   const zoom = useFlow((s) => s.transform[2])
   const q = pages[data.id]?.data
   if (!q) return null
   const level = zoom < 0.55 ? 'far' : zoom > 1.3 ? 'near' : 'mid'
   const state = questState(q, engine)
-  const chips = [...(q.issuer ?? []), ...(q.renown ?? []), ...(q.thresholds ?? [])].filter((r: Row) => r.ref && pages[r.ref]).map((r: Row) => r.ref!)
-  const synopsis = q.synopsis || /## Description\s*\n+([^\n#]+)/.exec(pages[data.id].body)?.[1]?.replace(/\[\[[^\]|]+\|?([^\]]*)\]\]/g, '$1') || ''
+  const chips = [...new Set(schema.fields.quest.filter((f) => f.kind === 'rows' && f.key !== 'leads_to').sort((a, b) => +!!b.giver - +!!a.giver)
+    .flatMap((f) => (q[f.key] ?? []) as Row[]).filter((r) => r.ref && pages[r.ref]).map((r) => r.ref!))]
+  const synopsis = q.synopsis || /^(?!#|\||>|\s*$)(.+)$/m.exec(pages[data.id].body)?.[1]?.replace(/\[\[[^\]|]+\|?([^\]]*)\]\]/g, '$1') || ''
   return (
-    <div className={`card z-${level}${data.dim ? ' dim' : ''}${selected === q.id ? ' sel' : ''}${state === 'needs' ? ' needs' : ''}`} style={{ borderTopColor: TONE[q.status ?? 'idea'] }} title={state === 'needs' ? 'Ready, and not yet in Animus' : undefined}>
-      <Handle type="target" position={Position.Left} />
+    <><Handle type="target" position={Position.Left} />
+    <div className={`card z-${level}${data.dim ? ' dim' : ''}${selected === q.id ? ' sel' : ''}${state === 'needs' ? ' needs' : ''}`} style={{ borderTopColor: TONE[q.status ?? 'idea'] }} title={state === 'needs' ? `Ready, and not yet in ${schema.engine?.name}` : undefined}>
       {level === 'far' ? <div className="card-far" style={{ fontSize: Math.min(64, 15 / zoom) }}>{q.code || q.title}</div> : <div className="card-head"><b>{q.code}</b> {q.title}</div>}
       {level !== 'far' && <>
         <div className="card-syn">{synopsis}</div>
-        <div className="card-chips">{chips.slice(0, level === 'near' ? 8 : 3).map((c) => <span key={c} className={`mini-chip t-${pages[c].data.type}`} onClick={(e) => { e.stopPropagation(); toggleFilter(c, e.shiftKey) }}>{pages[c].data.title}</span>)}{chips.length > 3 && level === 'mid' && <span className="more">+{chips.length - 3}</span>}</div>
-        {level === 'near' && <ul className="card-branches">{branches(pages[data.id].body).filter((b) => b.condition).slice(0, 4).map((b) => <li key={b.line}>{b.condition}</li>)}</ul>}
+        <div className="card-chips">{chips.slice(0, level === 'near' ? 8 : 3).map((c) => <span key={c} className="mini-chip" style={kindStyle(schema, pages[c].data.type)} onClick={(e) => { e.stopPropagation(); toggleFilter(c, e.shiftKey) }}>{pages[c].data.title}</span>)}{chips.length > 3 && level === 'mid' && <span className="more">+{chips.length - 3}</span>}</div>
+        {level === 'near' && <ul className="card-branches">{branches(pages[data.id].body, schema.branches).filter((b) => b.condition).slice(0, 4).map((b) => <li key={b.line}>{b.condition}</li>)}</ul>}
       </>}
-      <Handle type="source" position={Position.Right} />
     </div>
+    <Handle type="source" position={Position.Right} /></>
   )
 }
 const nodeTypes = { quest: QuestCard }
@@ -98,10 +100,10 @@ function Headers({ L }: { L: Layout }) {
 }
 
 export function MapView() {
-  const { pages, map, engine, selected, filters, text, payoffs } = useStore()
+  const { pages, map, engine, selected, filters, text, payoffs, schema } = useStore()
   const flow = useReactFlow()
   const L = useMemo(() => layout(pages, map), [pages, map])
-  const matches = useCallback((q: Data) => matchQuest(pages, q, filters, text, engine), [pages, filters, text, engine])
+  const matches = useCallback((q: Data) => matchQuest(schema, pages, q, filters, text, engine), [schema, pages, filters, text, engine])
   const placed = useMemo(() => new Set(Object.keys(L.place)), [L])
   const laid: Node[] = useMemo(() => Object.entries(L.place).map(([id, position]) => ({ id, type: 'quest', position, data: { id, dim: !matches(pages[id].data) }, width: CARD_W, height: CARD_H })), [L, matches, pages])
   const [nodes, setNodes, onNodesChange] = useNodesState(laid)
@@ -111,13 +113,13 @@ export function MapView() {
     for (const id of placed) {
       const p = pages[id]
       for (const r of (p.data.leads_to ?? []) as Row[]) if (r.ref && placed.has(r.ref)) out.push({ id: `l-${id}-${r.ref}`, source: id, target: r.ref, className: 'leads', markerEnd: { type: MarkerType.ArrowClosed } })
-      for (const b of branches(p.body)) for (const t of b.targets) if (placed.has(t)) {
+      for (const b of branches(p.body, schema.branches)) for (const t of b.targets) if (placed.has(t)) {
         const on = payoffs || selected === id || selected === t
         out.push({ id: `p-${id}-${b.line}-${t}`, source: id, target: t, className: 'payoff', hidden: !on, label: selected === id || selected === t ? b.condition : undefined, markerEnd: { type: MarkerType.ArrowClosed } })
       }
     }
     return out
-  }, [placed, pages, payoffs, selected])
+  }, [placed, pages, payoffs, selected, schema])
   const [menu, setMenu] = useState<{ source: string; target: string; x: number; y: number } | null>(null)
 
   /** Fits the whole grid with its top-left corner under the headers, instead of centring it. */
@@ -214,7 +216,7 @@ export function MapView() {
       <Headers L={L} />
       {menu && <div className="menu" style={{ left: menu.x, top: menu.y }}>
         <button onClick={() => connect(menu, 'leads')}>Leads to {label(pages, menu.target)}</button>
-        {branches(pages[menu.source].body).filter((b) => b.condition).map((b) => <button key={b.line} onClick={() => connect(menu, b.line)}>Pays off: {b.condition}</button>)}
+        {branches(pages[menu.source].body, schema.branches).filter((b) => b.condition).map((b) => <button key={b.line} onClick={() => connect(menu, b.line)}>Pays off: {b.condition}</button>)}
         <button className="muted" onClick={() => setMenu(null)}>Cancel</button></div>}
       <div className="tray"><b>Hooks</b>{L.tray.map((q) => <span key={q.id} className="hook" draggable onDragStart={(e) => e.dataTransfer.setData('qn/quest', q.id)} onClick={() => peek(q.id)}>{label(pages, q.id)}</span>)}
         {!L.tray.length && <span className="muted">Quests without an Act wait here. Drag one onto the map to place it.</span>}</div>
@@ -222,15 +224,15 @@ export function MapView() {
   )
 }
 
-function matchQuest(pages: Pages, q: Data, filters: string[], text: string, engine: EngineIndex | null) {
-  const refs = refsOf({ file: '', data: q, body: pages[q.id]?.body ?? '' })
+function matchQuest(s: Schema, pages: Pages, q: Data, filters: string[], text: string, engine: EngineIndex | null) {
+  const refs = refsOf(s, { file: '', data: q, body: pages[q.id]?.body ?? '' })
   const t = text.toLowerCase().trim()
   return filters.every((f) => f.startsWith('status:') ? q.status === f.slice(7) : f.startsWith('engine:') ? questState(q, engine) === f.slice(7) : refs.includes(f) || q.act === f)
     && (!t || `${q.code ?? ''} ${q.title} ${q.synopsis ?? ''}`.toLowerCase().includes(t))
 }
 
 function FilterBar({ shown, total }: { shown: number; total: number }) {
-  const { filters, text, payoffs, pages, map } = useStore()
+  const { filters, text, payoffs, pages, map, schema } = useStore()
   const tidy = () => { writeMap({}); toast('Ordered every cell by quest code', { label: 'Undo', run: () => writeMap(map) }) }
   return (
     <div className="filterbar">
@@ -239,8 +241,8 @@ function FilterBar({ shown, total }: { shown: number; total: number }) {
       <select value="" onChange={(e) => e.target.value && toggleFilter(e.target.value, true)}>
         <option value="">+ Filter</option>
         <optgroup label="Status">{['idea', 'outline', 'draft', 'review', 'ready'].map((s) => <option key={s} value={`status:${s}`}>{s}</option>)}</optgroup>
-        <optgroup label="Engine"><option value="engine:needs">Needs creating in Animus</option><option value="engine:none">Not in engine</option></optgroup>
-        {(['character', 'district', 'faction', 'threshold'] as const).map((t) => <optgroup key={t} label={t}>{byType(pages, t).map((p) => <option key={p.data.id} value={p.data.id}>{p.data.title}</option>)}</optgroup>)}
+        {schema.engine && <optgroup label="Engine"><option value="engine:needs">{stateLabel('needs', schema.engine.name)}</option><option value="engine:none">Not in engine</option></optgroup>}
+        {schema.kinds.filter((k) => !['quest', 'questline', 'act'].includes(k.id)).map((k) => <optgroup key={k.id} label={k.plural}>{byType(pages, k.id).map((p) => <option key={p.data.id} value={p.data.id}>{p.data.title}</option>)}</optgroup>)}
       </select>
       <span className="count">{shown === total ? `${total} quests` : `${shown} of ${total} quests`}</span>
       <button className={payoffs ? 'on' : ''} onClick={() => useStore.setState({ payoffs: !payoffs })} title="P">Payoffs</button>

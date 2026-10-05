@@ -2,7 +2,7 @@
 const url = process.env.QUESTNOTES_UPDATE_URL
 
 module.exports = {
-  appId: 'dev.brokenwings.questnotes',
+  appId: 'org.questnotes.app',
   productName: 'QuestNotes',
   directories: { output: 'release' },
   files: ['out/**'],

@@ -2,12 +2,16 @@
 extends EditorPlugin
 ## QuestNotes bridge. Listens on 127.0.0.1 on a port the OS picks and writes {v, port, token, pid, project} to
 ## res://.godot/questnotes_bridge.json (.godot is never committed). A client opens ws://127.0.0.1:<port>/questnotes,
-## sends {"op":"hello","token":...} within 5 s, then {"op":"open","id":n,"path":"res://resources/quests/<kind>/<id>.json",
-## "stage":"<stage id>"?}. Anything else closes the connection. If QuestNotes had to start the editor, it passes
-## `++ --questnotes-open=<res path>` and the quest opens once the editor has scanned the project.
+## sends {"op":"hello","token":...} within 5 s, then {"op":"open","id":n,"path":"res://...","stage":"<stage id>"?,
+## "adapter":"<name>"?}. Anything else closes the connection. If QuestNotes had to start the editor, it passes
+## `++ --questnotes-open=<res path>#<stage> --questnotes-adapter=<name>` and the quest opens once the project is scanned.
+##
+## Without an adapter a quest file opens in the inspector and the FileSystem dock. An adapter is a script in adapters/
+## with `static func open(path: String, stage: String) -> String` (returns "" or an error code), for quest systems
+## that have their own editor screen.
 
 const INFO := "res://.godot/questnotes_bridge.json"
-const QUESTS := "res://resources/quests/"
+const ADAPTERS := "res://addons/questnotes_bridge/adapters/"
 const AUTH_MS := 5000
 
 var _server := TCPServer.new()
@@ -25,14 +29,20 @@ func _enter_tree() -> void:
 			"pid": OS.get_process_id(), "project": ProjectSettings.globalize_path("res://")}))
 	f.close()
 	print("QuestNotes bridge listening on 127.0.0.1:%d" % _server.get_local_port())
+	var target := ""
+	var adapter := ""
 	for a in OS.get_cmdline_user_args():
 		if a.begins_with("--questnotes-open="):
-			var at := a.trim_prefix("--questnotes-open=").split("#")
-			var fs := EditorInterface.get_resource_filesystem()
-			await get_tree().process_frame  # let the main screens finish entering the tree
-			while fs.is_scanning():
-				await fs.filesystem_changed
-			print("startup open: ", _open(at[0], at[1] if at.size() > 1 else ""))
+			target = a.trim_prefix("--questnotes-open=")
+		elif a.begins_with("--questnotes-adapter="):
+			adapter = a.trim_prefix("--questnotes-adapter=")
+	if target != "":
+		var at := target.split("#")
+		var fs := EditorInterface.get_resource_filesystem()
+		await get_tree().process_frame  # let the main screens finish entering the tree
+		while fs.is_scanning():
+			await fs.filesystem_changed
+		print("startup open: ", _open(at[0], at[1] if at.size() > 1 else "", adapter))
 
 func _exit_tree() -> void:
 	for p in _peers:
@@ -70,7 +80,7 @@ func _process(_delta: float) -> void:
 					ws.close(4003, "unauthorized")
 					break
 			elif msg.get("op") == "open":
-				var error := _open(str(msg.get("path", "")), str(msg.get("stage", "")))
+				var error := _open(str(msg.get("path", "")), str(msg.get("stage", "")), str(msg.get("adapter", "")))
 				_send(ws, {"op": "open", "id": msg.get("id"), "ok": error == "", "error": error})
 			elif msg.get("op") == "ping":
 				_send(ws, {"op": "pong", "id": msg.get("id")})
@@ -82,28 +92,22 @@ func _send(ws: WebSocketPeer, d: Dictionary) -> void:
 	ws.send_text(JSON.stringify(d))
 
 ## "" on success, else an error code QuestNotes shows to the designer.
-func _open(path: String, stage: String) -> String:
-	if not path.begins_with(QUESTS) or not path.ends_with(".json") or path.contains(".."):
+func _open(path: String, stage: String, adapter: String) -> String:
+	if not path.begins_with("res://") or path.contains("..") or path.begins_with("res://.godot/"):
 		return "bad_path"
 	if not FileAccess.file_exists(path):
 		return "not_found"
-	EditorInterface.set_main_screen_editor("Animus")
-	EditorInterface.edit_resource(load(path))
-	if stage != "":
-		_select_stage(path, stage)
-	DisplayServer.window_request_attention()
-	DisplayServer.window_move_to_foreground()
-	return ""
-
-## Selects the stage in the Animus Quests tab (found by its node name, plugin.gd names its tabs), by index as
-## quests_editor.gd select(["stages", i]) expects. Silently does nothing if Animus changes shape: the quest is open anyway.
-func _select_stage(path: String, stage: String) -> void:
-	var q: Variant = JSON.parse_string(FileAccess.get_file_as_string(path))
-	var i := -1
-	if q is Dictionary and q.get("stages") is Array:
-		for k in q.stages.size():
-			if q.stages[k] is Dictionary and q.stages[k].get("id") == stage:
-				i = k
-	for c in EditorInterface.get_editor_main_screen().get_children():
-		if c is TabContainer and c.has_node("Quests") and c.get_node("Quests").has_method("select") and i >= 0:
-			c.get_node("Quests").select(["stages", i])
+	var error := ""
+	if adapter == "":
+		EditorInterface.select_file(path)
+		if ResourceLoader.exists(path):
+			EditorInterface.edit_resource(load(path))
+	else:
+		var script := ADAPTERS + adapter + ".gd"
+		if not RegEx.create_from_string("^[a-z0-9_]+$").search(adapter) or not FileAccess.file_exists(script):
+			return "bad_adapter"
+		error = str(load(script).open(path, stage))
+	if error == "":
+		DisplayServer.window_request_attention()
+		DisplayServer.window_move_to_foreground()
+	return error

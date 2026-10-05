@@ -2,7 +2,7 @@
   "name": "questnotes",
   "productName": "QuestNotes",
   "version": "0.1.0",
-  "description": "Lore-first quest design for Broken Wings",
+  "description": "Branching quest design in story terms",
   "main": "out/main/index.js",
   "private": true,
   "scripts": {
@@ -12,7 +12,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
     "dist": "electron-vite build && electron-builder --config electron-builder.config.cjs --publish never",
-    "test:e2e": "electron-vite build && vitest run tests/e2e.test.ts"
+    "test:e2e": "electron-vite build && vitest run tests/e2e.test.ts",
+    "install:linux": "npm run dist && node scripts/install-linux.mjs"
   },
   "dependencies": {
     "dugite": "3.2.3",
@@ -53,6 +54,6 @@
     "esbuild@0.28.2": true,
     "electron-winstaller@5.4.0": true
   },
-  "author": "Broken Wings",
+  "author": "QuestNotes",
   "desktopName": "questnotes.desktop"
 }

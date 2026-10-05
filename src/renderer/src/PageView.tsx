@@ -3,23 +3,24 @@ import { useStore, setData, peek, openFull, trashPage, toast } from './store'
 import { call } from './api'
 import { Editor } from './Editor'
 import { Chip, EngineBadge, Picker } from './ui'
-import { byType, completeness, derive, label, roles, roman } from './derive'
-import { ARCHETYPES, EXTRA_OPTIONS, FIELDS, STATUSES, STATUS_LABEL, TYPE_INFO, type Field, type Row } from '../../shared/schema'
-import { characterState, questBadge, questState, suggestCharacterId, suggestQuestId } from '../../shared/engine'
+import { byType, completeness, derive, kindLabel, label, roles, roman } from './derive'
+import { castKind, extraKey, giverField, STATUSES, STATUS_LABEL, type Field, type Row } from '../../shared/schema'
+import { characterState, opensInEditor, questState, stateLabel, suggestCharacterId, suggestQuestId } from '../../shared/engine'
 import { HONORIFIC, today, type Page } from '../../shared/page'
 
 export function PageView({ id, inPeek }: { id: string; inPeek?: boolean }) {
   const p = useStore((s) => s.pages[id])
+  const schema = useStore((s) => s.schema)
   const [adding, setAdding] = useState(false)
   if (!p) return <div className="empty">This page is no longer here.</div>
   const d = p.data
-  const fields = FIELDS[d.type] ?? []
+  const fields = schema.fields[d.type] ?? []
   const shown = fields.filter((f) => !f.optional || hasValue(d[f.key]) || adding)
   const set = (patch: object) => setData(id, patch)
   return (
     <article className={`page t-${d.type}`}>
       <header className="page-head">
-        <div className="kind">{TYPE_INFO[d.type].label}{d.type === 'act' && d.order ? ` ${roman(d.order)}` : ''}</div>
+        <div className="kind">{kindLabel(schema, d.type)}{d.type === 'act' && d.order ? ` ${roman(d.order)}` : ''}</div>
         <div className="titles">
           {d.type === 'quest' && <input className="code" value={d.code ?? ''} placeholder="Code" onChange={(e) => set({ code: e.target.value })} />}
           <input className="title" value={d.title} placeholder="Title" autoFocus={!d.title} onChange={(e) => set({ title: e.target.value })} spellCheck />
@@ -29,11 +30,10 @@ export function PageView({ id, inPeek }: { id: string; inPeek?: boolean }) {
           <div className="status-row">
             <div className="seg">{STATUSES.map((s) => <button key={s} className={d.status === s ? `on s-${s}` : ''} onClick={() => set({ status: s })}>{STATUS_LABEL[s]}</button>)}</div>
             <Completeness p={p} />
-            <div className="seg small">{ARCHETYPES.map((a) => <button key={a} className={d.archetype === a ? 'on' : ''} onClick={() => set({ archetype: d.archetype === a ? undefined : a })}>{a}</button>)}</div>
           </div>
         </>}
       </header>
-      {(d.type === 'quest' || d.type === 'character') && <AnimusBox p={p} />}
+      {schema.engine && (d.type === 'quest' || d.type === castKind(schema)) && <EngineBox p={p} />}
       <section className="fields">
         {shown.filter((f) => !f.effect).map((f) => <FieldView key={f.key} p={p} f={f} />)}
         {fields.some((f) => f.optional && !hasValue(d[f.key])) && !adding && <button className="link" onClick={() => setAdding(true)}>+ Add field</button>}
@@ -52,7 +52,7 @@ export function PageView({ id, inPeek }: { id: string; inPeek?: boolean }) {
 const hasValue = (v: unknown) => v !== undefined && v !== '' && !(Array.isArray(v) && !v.length)
 
 function Completeness({ p }: { p: Page }) {
-  const c = completeness(p)
+  const c = completeness(useStore((s) => s.schema), p)
   return <span className={`complete${c.done === c.total ? ' full' : ''}`} title={c.missing.length ? `Missing: ${c.missing.join(', ')}` : 'Complete'}>{c.done} of {c.total}</span>
 }
 
@@ -84,9 +84,9 @@ function Rows({ p, f }: { p: Page; f: Field }) {
       {rows.map((r, i) => (
         <div key={i} className="row">
           {r.ref ? <Chip id={r.ref} /> : r.none ? <span className="none">None</span> : <input className="free" value={r.text ?? ''} placeholder="Free text" onChange={(e) => patch(i, { text: e.target.value })} />}
-          {f.extras!.map((x) => EXTRA_OPTIONS[x]
-            ? <select key={x} className={r[x] ? '' : 'empty'} value={r[x] ?? ''} onChange={(e) => patch(i, { [x]: e.target.value || undefined })}><option value="">{x}</option>{EXTRA_OPTIONS[x]!.map((o) => <option key={o}>{o}</option>)}</select>
-            : <input key={x} className={`x-${x}`} value={r[x] ?? ''} placeholder={x} onChange={(e) => patch(i, { [x]: e.target.value })} spellCheck />)}
+          {(f.extras ?? []).map((x) => { const k = extraKey(x); return typeof x === 'object'
+            ? <select key={k} className={r[k] ? '' : 'empty'} value={r[k] ?? ''} onChange={(e) => patch(i, { [k]: e.target.value || undefined })}><option value="">{k}</option>{x.options.map((o) => <option key={o}>{o}</option>)}</select>
+            : <input key={k} className={`x-${k}`} value={r[k] ?? ''} placeholder={k} onChange={(e) => patch(i, { [k]: e.target.value })} spellCheck /> })}
           <button className="x" title="Remove" onClick={() => set(rows.filter((_, n) => n !== i))}>×</button>
         </div>
       ))}
@@ -97,33 +97,36 @@ function Rows({ p, f }: { p: Page; f: Field }) {
   )
 }
 
-function AnimusBox({ p }: { p: Page }) {
-  const { engine, pages } = useStore()
+function EngineBox({ p }: { p: Page }) {
+  const { engine, pages, schema } = useStore()
   const [linking, setLinking] = useState(false)
+  const e = schema.engine!
   const d = p.data
-  const a = d.animus ?? {}
-  const set = (patch: object) => setData(d.id, { animus: { ...a, ...patch } })
-  if (d.type === 'character') {
-    const needed = byType(pages, 'quest').some((q) => q.data.status === 'ready' && (q.data.issuer ?? []).some((r: Row) => r.ref === d.id))
+  const a = d.engine ?? {}
+  const set = (patch: object) => setData(d.id, { engine: { ...a, ...patch } })
+  if (d.type !== 'quest') {
+    const giver = giverField(schema)
+    const needed = !!giver && byType(pages, 'quest').some((q) => q.data.status === 'ready' && (q.data[giver.key] ?? []).some((r: Row) => r.ref === d.id))
     const s = characterState(d, engine, needed)
-    const text = { unknown: 'No engine data', in: 'In Animus', needs: 'Needs a unique in Animus', none: 'Not in engine' }[s]
+    const text = { unknown: 'No engine data', in: `In ${e.name}`, needs: `Needs creating in ${e.name}`, none: 'Not in engine' }[s]
     const sugg = suggestCharacterId(d, engine)
-    return <div className={`animus tone-${s === 'needs' ? 'amber' : s === 'in' ? 'green' : 'grey'}`}><EngineBadge state={s === 'in' ? 'built' : s === 'needs' ? 'needs' : 'none'} text={text} />
-      <label>character_id <input value={a.character_id ?? ''} placeholder={d.title.replace(HONORIFIC, '').split(' ')[0].toLowerCase()} onChange={(e) => set({ character_id: e.target.value || undefined })} /></label>
-      {sugg && <button onClick={() => set({ character_id: sugg })}>Link to engine character “{sugg}”</button>}</div>
+    return <div className={`engine-box tone-${s === 'needs' ? 'amber' : s === 'in' ? 'green' : 'grey'}`}><EngineBadge state={s === 'in' ? 'built' : s === 'needs' ? 'needs' : 'none'} text={text} />
+      <label>{e.name} id <input value={a.id ?? ''} placeholder={d.title.replace(HONORIFIC, '').split(' ')[0].toLowerCase()} onChange={(x) => set({ id: x.target.value || undefined })} /></label>
+      {sugg && <button onClick={() => set({ id: sugg })}>Link to “{sugg}”</button>}</div>
   }
   const state = questState(d, engine)
-  const hits = a.quest_id ? engine?.quests[a.quest_id] ?? [] : []
+  const hits = a.id ? engine?.quests[a.id] ?? [] : []
+  const kinds = e.quests?.kinds ?? []
   return (
-    <div className={`animus tone-${state === 'needs' ? 'amber' : ['missing', 'duplicate'].includes(state) ? 'red' : state === 'link' ? 'blue' : 'grey'}`}>
-      <EngineBadge state={state} text={questBadge(state, hits)} />
-      <label>quest_id <input value={a.quest_id ?? ''} placeholder={suggestQuestId(d.code ?? '', d.title)} onChange={(e) => set({ quest_id: e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, '') || undefined, linked_on: undefined })} /></label>
-      <select value={a.kind ?? ''} onChange={(e) => set({ kind: e.target.value || undefined })}><option value="">kind</option><option>main</option><option>side</option><option>emergent</option></select>
-      {state === 'link' && <button onClick={() => set({ linked_on: today(), kind: hits[0].kind })} title={`Animus calls it “${hits[0].title}”, ${hits[0].stages.length} stages`}>Link to “{hits[0].title}”</button>}
-      {engine && <span className="ref"><button onClick={() => setLinking(true)}>Link…</button>{linking && <EnginePicker onClose={() => setLinking(false)} onPick={(qid, kind) => set({ quest_id: qid, kind, linked_on: today() })} />}</span>}
-      {hits.length === 1 && <button onClick={() => openInAnimus(hits[0].path)}>Open in Animus</button>}
+    <div className={`engine-box tone-${state === 'needs' ? 'amber' : ['missing', 'duplicate'].includes(state) ? 'red' : state === 'link' ? 'blue' : 'grey'}`}>
+      <EngineBadge state={state} text={stateLabel(state, e.name, hits)} />
+      <label>{e.name} id <input value={a.id ?? ''} placeholder={suggestQuestId(d.code ?? '', d.title)} onChange={(x) => set({ id: x.target.value.trim() || undefined, linked_on: undefined })} /></label>
+      {kinds.length > 0 && <select value={a.kind ?? ''} onChange={(x) => set({ kind: x.target.value || undefined })}><option value="">kind</option>{kinds.map((k) => <option key={k}>{k}</option>)}</select>}
+      {state === 'link' && <button onClick={() => set({ linked_on: today(), kind: hits[0].kind || undefined })} title={`${e.name} calls it “${hits[0].title}”, ${hits[0].stages.length} stages`}>Link to “{hits[0].title}”</button>}
+      {engine && <span className="ref"><button onClick={() => setLinking(true)}>Link…</button>{linking && <EnginePicker onClose={() => setLinking(false)} onPick={(id, kind) => set({ id, kind: kind || undefined, linked_on: today() })} />}</span>}
+      {hits.length === 1 && opensInEditor(e) && <button onClick={() => openInEngine(hits[0].path)}>Open in {e.name}</button>}
       <button onClick={() => peek(d.id, true)}>Handoff brief</button>
-      {hits.length === 1 && hits[0].stages.length > 1 && <details><summary>{hits[0].stages.length} stages</summary>{hits[0].stages.map((s) => <button key={s} className="mini" onClick={() => openInAnimus(hits[0].path, s)}>{s}</button>)}</details>}
+      {hits.length === 1 && opensInEditor(e) && hits[0].stages.length > 1 && <details><summary>{hits[0].stages.length} stages</summary>{hits[0].stages.map((s) => <button key={s} className="mini" onClick={() => openInEngine(hits[0].path, s)}>{s}</button>)}</details>}
     </div>
   )
 }
@@ -133,20 +136,21 @@ function EnginePicker({ onPick, onClose }: { onPick: (id: string, kind: string) 
   const [q, setQ] = useState('')
   const list = Object.entries(engine?.quests ?? {}).filter(([k, v]) => `${k} ${v[0].title}`.toLowerCase().includes(q.toLowerCase()))
   return <div className="picker"><input autoFocus value={q} placeholder="Engine quests…" onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.key === 'Escape' && onClose()} />
-    <ul>{list.map(([k, v]) => <li key={k} onMouseDown={() => { onPick(k, v[0].kind); onClose() }}>{k} · {v[0].title}<small>{v[0].stages.length} stages · {v[0].kind}</small></li>)}</ul></div>
+    <ul>{list.map(([k, v]) => <li key={k} onMouseDown={() => { onPick(k, v[0].kind); onClose() }}>{k} · {v[0].title}<small>{v[0].stages.length} stages{v[0].kind && ` · ${v[0].kind}`}</small></li>)}</ul></div>
 }
 
-export async function openInAnimus(path: string, stage?: string) {
-  const r = await call('animus:open', path, stage)
-  if (r.ok) toast(r.started ? 'Starting Godot. The quest opens when the editor is ready.' : `Opened ${path.split('/').pop()} in Animus. Switch to Godot.`)
-  else toast({ 'no-game': 'Choose the game folder in Settings first.', 'no-godot': 'Set the Godot executable in Settings first.', not_found: 'Animus has no such file any more.' }[r.error ?? ''] ?? `Godot did not open it (${r.error}).`)
+export async function openInEngine(path: string, stage?: string) {
+  const name = useStore.getState().schema.engine?.name ?? 'the engine'
+  const r = await call('engine:open', path, stage)
+  if (r.ok) toast(r.started ? 'Starting Godot. The quest opens when the editor is ready.' : `Opened ${path.split('/').pop()} in ${name}. Switch to Godot.`)
+  else toast({ 'no-game': 'Choose the game folder in Settings first.', 'no-godot': 'Set the Godot executable in Settings first.', not_found: `${name} has no such file any more.` }[r.error ?? ''] ?? `Godot did not open it (${r.error}).`)
 }
 
 function Related({ p }: { p: Page }) {
-  const pages = useStore((s) => s.pages)
-  const { backlinks, incoming } = useMemo(() => derive(pages), [pages])
+  const { pages, schema } = useStore()
+  const { backlinks, incoming } = useMemo(() => derive(schema, pages), [schema, pages])
   const id = p.data.id
-  const quests = p.data.type === 'character' ? byType(pages, 'quest').map((q) => ({ q, r: roles(q.data, id) })).filter((x) => x.r.length) : []
+  const quests = p.data.type === castKind(schema) ? byType(pages, 'quest').map((q) => ({ q, r: roles(schema, q.data, id) })).filter((x) => x.r.length) : []
   const back = [...(backlinks.get(id) ?? [])].filter((x) => pages[x])
   const setups = incoming.get(id) ?? []
   const leadsFrom = byType(pages, 'quest').filter((q) => (q.data.leads_to ?? []).some((r: Row) => r.ref === id))

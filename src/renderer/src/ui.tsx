@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useStore, peek, toggleFilter, createPage } from './store'
-import { label } from './derive'
-import { TYPE_INFO, type PageType, STATUS_LABEL, type Status } from '../../shared/schema'
+import { kindLabel, label } from './derive'
+import { kindOf, STATUS_LABEL, type Schema, type Status } from '../../shared/schema'
 import { STATE_TONE, type QuestState } from '../../shared/engine'
 
 const Badge = ({ tone, children, title }: { tone: string; children: ReactNode; title?: string }) => <span className={`badge ${tone}`} title={title}>{children}</span>
@@ -10,23 +10,26 @@ export const EngineBadge = ({ state, text }: { state: QuestState | string; text:
 
 /** A page reference: click opens it beside the current view, Alt-click filters the map by it. */
 export function Chip({ id, onRemove }: { id: string; onRemove?: () => void }) {
-  const pages = useStore((s) => s.pages)
+  const { pages, schema } = useStore()
   const p = pages[id]
   return (
-    <span className={`chip t-${p?.data.type ?? 'missing'}`} onClick={(e) => (e.altKey ? toggleFilter(id, e.shiftKey) : p && peek(id))} title={p ? `${TYPE_INFO[p.data.type].label} · Alt-click to filter the map` : 'Missing page'}>
+    <span className={`chip${p ? '' : ' missing'}`} style={kindStyle(schema, p?.data.type)} onClick={(e) => (e.altKey ? toggleFilter(id, e.shiftKey) : p && peek(id))} title={p ? `${kindLabel(schema, p.data.type)} · Alt-click to filter the map` : 'Missing page'}>
       {p ? label(pages, id) : `${id}?`}
       {onRemove && <button className="x" onClick={(e) => { e.stopPropagation(); onRemove() }}>×</button>}
     </span>
   )
 }
 
+/** A page kind's colour, for the edge of its chips. */
+export const kindStyle = (s: Schema, type?: string) => ({ '--kc': (type && kindOf(s, type)?.color) || undefined }) as React.CSSProperties
+
 /** Searches pages of the allowed types, recent ones first; can create a new page from the query. */
 export function Picker({ types, onPick, onClose, extra = [] }: {
-  types: PageType[]; onPick: (id: string) => void; onClose: () => void; extra?: { label: string; run: (q: string) => void }[]
+  types: string[]; onPick: (id: string) => void; onClose: () => void; extra?: { label: string; run: (q: string) => void }[]
 }) {
   const [q, setQ] = useState('')
   const [i, setI] = useState(0)
-  const { pages, recent } = useStore()
+  const { pages, recent, schema } = useStore()
   const ref = useRef<HTMLDivElement>(null)
   useEffect(() => {
     const away = (e: MouseEvent) => { if (!ref.current?.contains(e.target as Node)) onClose() }
@@ -37,10 +40,10 @@ export function Picker({ types, onPick, onClose, extra = [] }: {
     const ql = q.toLowerCase()
     const hits = Object.values(pages).filter((p) => types.includes(p.data.type) && (!ql || `${p.data.code ?? ''} ${p.data.title} ${(p.data.aliases ?? []).join(' ')}`.toLowerCase().includes(ql)))
     hits.sort((a, b) => (recent.indexOf(b.data.id) + 1 || 0) - (recent.indexOf(a.data.id) + 1 || 0) || a.data.title.localeCompare(b.data.title))
-    const list = hits.slice(0, 40).map((p) => ({ key: p.data.id, label: label(pages, p.data.id), kind: TYPE_INFO[p.data.type].label, run: () => onPick(p.data.id) }))
-    if (q.trim() && types[0]) list.push({ key: '+new', label: `New ${TYPE_INFO[types[0]].label.toLowerCase()} “${q.trim()}”`, kind: '', run: async () => onPick(await createPage(types[0], q.trim())) })
+    const list = hits.slice(0, 40).map((p) => ({ key: p.data.id, label: label(pages, p.data.id), kind: kindLabel(schema, p.data.type), run: () => onPick(p.data.id) }))
+    if (q.trim() && types[0]) list.push({ key: '+new', label: `New ${kindLabel(schema, types[0]).toLowerCase()} “${q.trim()}”`, kind: '', run: async () => onPick(await createPage(types[0], q.trim())) })
     return [...list, ...extra.map((x) => ({ key: x.label, label: x.label, kind: '', run: () => x.run(q) }))]
-  }, [q, pages, types, recent, extra, onPick])
+  }, [q, pages, types, recent, extra, onPick, schema])
   const pick = (n: number) => { items[n]?.run(); onClose() }
   return (
     <div className="picker" ref={ref}>

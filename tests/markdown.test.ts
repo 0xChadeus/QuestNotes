@@ -2,9 +2,9 @@
 import { beforeAll, describe, expect, it } from 'vitest'
 import { Window } from 'happy-dom'
 import { canonBody } from '../src/shared/page'
-import { QUEST_TEMPLATE } from '../src/shared/schema'
+import { resolveSchema } from '../src/shared/schema'
 import { importDocs } from '../src/main/importer'
-import { docs } from './fixtures'
+import { CONFIG, DIR, JOBS, real, synthetic } from './fixtures'
 
 let roundTrip: (md: string) => string
 beforeAll(async () => {
@@ -19,38 +19,38 @@ beforeAll(async () => {
 
 export const SAMPLE = `## Description
 
-[[ch_lyra_frost|Lyra Frost]] approaches Ed about four of her girls found dead in an [[di_ashfield]] alley. The scene is *arranged*, not **scattered**.
+[[ch_mara_quill|Mara Quill]] asks for help: three boats came back empty to the [[lo_saltmarsh]] quay. The nets were *cut*, not **torn**.
 
-## Execution vectors
+## Expected path
 
-### Method
+### Approach
 
-Almost entirely social and investigative.
+Mostly talk and searching.
 
-### Disclosure
+### Reporting
 
-- Reporting fully to Lyra is the path of least resistance.
-- Reporting to Marcus elevates the case.
+- Telling Mara keeps it quiet.
+- Telling the Guild makes it official.
 
-## Branching surfaces
+## Branches
 
-| Branch condition | Outcome | Pays off in |
+| Condition | Outcome | Pays off in |
 | --- | --- | --- |
-| Player reports to Marcus immediately | Marcus notes the case but assigns no resources. | [[th_conspiracy]] |
-| Player finds the vertical blood trail | The Undercity connection is seeded a quest earlier. | [[q_mq03]] |
-| Player rough-handles witnesses | Ashfield Renown moves toward Notoriety. |  |
+| Player tells the Guild at once | The Guild notes it and sends no one. | [[se_who_sank_the_meridian]] |
+| Player finds the cut ropes | The cave lead is set up a quest earlier. | [[q_mq03]] |
+| Player threatens the dock workers | Saltmarsh standing drops. |  |
 
-## Developer note
+## Notes
 
-> The crime scene should feel disturbing in its deliberateness.
+> The empty boats should feel deliberate.
 `
 
 describe('markdown round trip', () => {
   it('keeps a real quest page byte for byte', () => expect(roundTrip(SAMPLE)).toBe(SAMPLE))
   it('is stable on a second save', () => expect(roundTrip(roundTrip(SAMPLE))).toBe(SAMPLE))
-  it('keeps the new-quest template', () => expect(roundTrip(QUEST_TEMPLATE)).toBe(canonBody(QUEST_TEMPLATE)))
+  it('keeps the new-quest template', () => { const t = resolveSchema().template.quest; expect(roundTrip(t)).toBe(canonBody(t)) })
   it('changes one line for a one-word edit in a table cell', () => {
-    const edited = roundTrip(SAMPLE.replace('assigns no resources', 'assigns few resources'))
+    const edited = roundTrip(SAMPLE.replace('sends no one', 'sends a clerk'))
     const a = SAMPLE.split('\n'), b = edited.split('\n')
     expect(a.filter((l, i) => l !== b[i]).length).toBe(1)
   })
@@ -58,6 +58,7 @@ describe('markdown round trip', () => {
 
 describe('imported pages', () => {
   it('are a fixed point of the editor once normalised', () => {
-    for (const p of importDocs(docs(), []).pages) { const once = roundTrip(p.body); expect(roundTrip(once)).toBe(once) }
+    const theirs = DIR && CONFIG ? importDocs(real(), CONFIG.import ?? [], resolveSchema(CONFIG), []).pages : []
+    for (const p of [...importDocs(synthetic, JOBS, resolveSchema(), []).pages, ...theirs]) { const once = roundTrip(p.body); expect(roundTrip(once)).toBe(once) }
   })
 })

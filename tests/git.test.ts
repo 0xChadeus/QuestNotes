@@ -8,8 +8,8 @@ import * as git from '../src/main/git'
 import { writePage } from '../src/shared/page'
 import { resolve } from '../src/shared/merge'
 
-const page = (status: string, rows: string[]) => writePage({ id: 'q_mq02', type: 'quest', title: 'Night Life', status },
-  `## Branching surfaces\n\n| Branch condition | Outcome | Pays off in |\n| --- | --- | --- |\n${rows.map((r) => `| ${r} | o |  |`).join('\n')}\n`)
+const page = (status: string, rows: string[]) => writePage({ id: 'q_mq02', type: 'quest', title: 'Night Tide', status },
+  `## Branches\n\n| Condition | Outcome | Pays off in |\n| --- | --- | --- |\n${rows.map((r) => `| ${r} | o |  |`).join('\n')}\n`)
 
 describe('sync', () => {
   const tmp = mkdtempSync(path.join(tmpdir(), 'qn-git-'))
@@ -21,7 +21,7 @@ describe('sync', () => {
     await exec(['init', '--bare', '-b', 'main', remote], tmp)
     mkdirSync(path.join(alice, 'quests'), { recursive: true })
     writeFileSync(path.join(alice, '.gitattributes'), '* text=auto eol=lf\n')
-    write(alice, page('draft', ['Reports to Marcus', 'Keeps it quiet', 'Finds the blood trail']))
+    write(alice, page('draft', ['Tells the Guild', 'Keeps it quiet', 'Finds the cut ropes']))
     await git.init(alice)
     await git.setRemote(alice, remote)
     expect(await git.sync(alice)).toEqual({})
@@ -29,17 +29,17 @@ describe('sync', () => {
   })
 
   it('merges edits to neighbouring table rows without asking', async () => {
-    write(alice, page('draft', ['Reports to Marcus at once', 'Keeps it quiet', 'Finds the blood trail']))
-    write(bob, page('draft', ['Reports to Marcus', 'Keeps it between Ed and Lyra', 'Finds the blood trail']))
+    write(alice, page('draft', ['Tells the Guild at once', 'Keeps it quiet', 'Finds the cut ropes']))
+    write(bob, page('draft', ['Tells the Guild', 'Keeps it between Mara and the player', 'Finds the cut ropes']))
     expect(await git.sync(alice)).toEqual({})
     expect(await git.sync(bob)).toEqual({})
     expect(await git.sync(alice)).toEqual({})
-    for (const who of [alice, bob]) expect(readFileSync(file(who), 'utf8')).toBe(page('draft', ['Reports to Marcus at once', 'Keeps it between Ed and Lyra', 'Finds the blood trail']))
+    for (const who of [alice, bob]) expect(readFileSync(file(who), 'utf8')).toBe(page('draft', ['Tells the Guild at once', 'Keeps it between Mara and the player', 'Finds the cut ropes']))
   })
 
   it('returns same-field edits for the designer to choose', async () => {
-    write(alice, page('review', ['Reports to Marcus at once', 'Keeps it between Ed and Lyra', 'Finds the blood trail']))
-    write(bob, page('ready', ['Reports to Marcus at once', 'Keeps it between Ed and Lyra', 'Finds the blood trail']))
+    write(alice, page('review', ['Tells the Guild at once', 'Keeps it between Mara and the player', 'Finds the cut ropes']))
+    write(bob, page('ready', ['Tells the Guild at once', 'Keeps it between Mara and the player', 'Finds the cut ropes']))
     await git.sync(alice)
     const r = await git.sync(bob)
     expect(r.conflicts?.[0].conflicts).toEqual([{ base: 'status: draft', ours: 'status: ready', theirs: 'status: review' }])

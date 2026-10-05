@@ -1,8 +1,8 @@
 // Page files: a YAML 1.2 header written only by this canonical writer, then a Markdown body.
 import { parse, parseDocument, stringify, visit, isSeq } from 'yaml'
-import { FIELDS, TYPE_INFO, type PageType, type Row } from './schema'
+import { kindOf, type Row, type Schema } from './schema'
 
-export type Data = Record<string, any> & { id: string; type: PageType; title: string }
+export type Data = Record<string, any> & { id: string; type: string; title: string }
 export interface Page { file: string; data: Data; body: string }
 
 const FRONT = /^---\n([\s\S]*?\n)?---\n\n?/
@@ -37,22 +37,22 @@ const isEmpty = (x: unknown) => x === undefined || x === null || x === '' || (Ar
 
 const slug = (s: string) => s.normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/['’]/g, '').replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 48) || 'page'
 
-export function newId(type: PageType, title: string, taken: (id: string) => boolean): string {
-  const base = `${TYPE_INFO[type].prefix}_${slug(title)}`
+export function newId(s: Schema, type: string, title: string, taken: (id: string) => boolean): string {
+  const base = `${kindOf(s, type)?.prefix ?? type}_${slug(title)}`
   let id = base
   for (let i = 2; taken(id); i++) id = `${base}_${i}`
   return id
 }
 
-export const fileFor = (type: PageType, id: string) => `${TYPE_INFO[type].dir}/${id}.md`
+export const fileFor = (s: Schema, type: string, id: string) => `${kindOf(s, type)?.dir ?? type}/${id}.md`
 
 const LINK = /\[\[([a-z0-9_\/-]+)(?:\|[^\]]*)?\]\]/g
 const bodyLinks = (body: string) => [...body.matchAll(LINK)].map((m) => m[1])
 
 /** Every page id a page points at, from its header fields and its body. */
-export function refsOf(p: Page): string[] {
+export function refsOf(s: Schema, p: Page): string[] {
   const out = new Set<string>(bodyLinks(p.body))
-  for (const f of FIELDS[p.data.type] ?? []) {
+  for (const f of s.fields[p.data.type] ?? []) {
     const v = p.data[f.key]
     if (f.kind === 'ref' && typeof v === 'string') out.add(v)
     if (f.kind === 'rows' && Array.isArray(v)) for (const r of v as Row[]) if (r?.ref) out.add(r.ref)
@@ -61,21 +61,20 @@ export function refsOf(p: Page): string[] {
   return [...out]
 }
 
-/** Branching-surface rows: the table under "## Branching surfaces", one line per row. */
+/** Branch rows: the table under the project's branch heading ("## Branches" by default), one line per row. */
 export interface Branch { line: number; condition: string; outcome: string; payoff: string; targets: string[] }
-export function branches(body: string): Branch[] {
+export function branches(body: string, heading: string): Branch[] {
   const lines = body.split('\n')
-  const h = lines.findIndex((l) => /^#{2,3}\s+branching surfaces/i.test(l))
+  const h = lines.findIndex((l) => /^#{2,3}\s/.test(l) && l.replace(/^#+\s+/, '').trim().toLowerCase() === heading.toLowerCase())
   if (h < 0) return []
   const out: Branch[] = []
-  let seenTable = false
+  let row = 0
   for (let i = h + 1; i < lines.length; i++) {
     const l = lines[i]
     if (/^#{1,3}\s/.test(l)) break
-    if (!l.startsWith('|')) { if (seenTable) break; continue }
-    seenTable = true
+    if (!l.startsWith('|')) { if (row) break; continue }
     const cells = splitRow(l)
-    if (cells.every((c) => /^:?-+:?$/.test(c)) || /^branch condition$/i.test(cells[0])) continue
+    if (row++ < 2) continue // the header and its --- line
     out.push({ line: i, condition: cells[0] ?? '', outcome: cells[1] ?? '', payoff: cells[2] ?? '', targets: bodyLinks(cells[2] ?? '') })
   }
   return out
@@ -92,6 +91,7 @@ export function addPayoff(body: string, line: number, target: string): string {
   return lines.join('\n')
 }
 
-export const HONORIFIC = /^(Captain|Brother|Father|Corporal|Doctor|Old|Lady|Lord|Sister|Mother|Master|Sergeant)\s+/
+/** Titles before a name, so "Captain Ada Reyes" is also found as "Ada Reyes". */
+export const HONORIFIC = /^(Captain|Commander|General|Sergeant|Corporal|Lieutenant|Brother|Sister|Father|Mother|Lady|Lord|Sir|Dame|Doctor|Dr\.?|Mr\.?|Mrs\.?|Ms\.?|Professor|Master|King|Queen|Prince|Princess|Old)\s+/
 
 export const today = () => new Date().toISOString().slice(0, 10)

@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useStore, peek, update, createPage, toast } from './store'
 import { call } from './api'
-import { byType, issues, label, roles, roman, type Pages } from './derive'
+import { byType, issues, kindLabel, label, roles, roman, type Pages } from './derive'
 import { Chip, StatusPill } from './ui'
-import { openInAnimus } from './PageView'
-import { questState, STATE_LABEL, type QuestState } from '../../shared/engine'
-import { TYPE_INFO, type PageType, type Row } from '../../shared/schema'
+import { openInEngine } from './PageView'
+import { opensInEditor, questState, stateLabel, type QuestState } from '../../shared/engine'
+import { castFields, castKind, extraKey, giverField, kindOf, type Row } from '../../shared/schema'
 import type { Page } from '../../shared/page'
 
 /** Quests grouped by Act, in map order. */
@@ -16,24 +16,26 @@ function byAct(pages: Pages, keep: (q: Page) => boolean = () => true) {
   return [...groups, none].filter((g) => g.quests.length)
 }
 
-export function Ledger() {
-  const pages = useStore((s) => s.pages)
+/** Quests against the pages of one kind that a quest field names, as questnotes.yaml's `matrix` describes. */
+export function Matrix() {
+  const { pages, schema } = useStore()
   const [only, setOnly] = useState(true)
-  const ths = byType(pages, 'threshold')
-  const feeds = (q: Page, t: string) => ((q.data.thresholds ?? []) as Row[]).filter((r) => r.ref === t)
-  const groups = byAct(pages, (q) => !only || ths.some((t) => feeds(q, t.data.id).length))
+  const m = schema.matrix!
+  const f = schema.fields.quest.find((x) => x.key === m.field)
+  const cols = byType(pages, m.kind)
+  const feeds = (q: Page, t: string) => ((q.data[m.field] ?? []) as Row[]).filter((r) => r.ref === t)
+  const shown = (r: Row) => (f?.extras ?? []).map(extraKey).filter((k) => k !== 'note').map((k) => r[k]).find(Boolean) ?? ''
+  const groups = byAct(pages, (q) => !only || cols.some((t) => feeds(q, t.data.id).length))
   return (
     <div className="table-view">
-      <div className="toolbar"><h2>Threshold ledger</h2><label><input type="checkbox" checked={only} onChange={(e) => setOnly(e.target.checked)} /> Only contributing quests</label>
-        <span className="muted">Amber: one quest is the only contributor in that Act.</span></div>
-      <div className="scroll"><table className="grid ledger">
-        <thead><tr><th>Quest</th>{ths.map((t) => <th key={t.data.id} onClick={() => peek(t.data.id)}>{t.data.title}</th>)}</tr></thead>
-        <tbody>{groups.map((g) => <Group key={g.id} title={g.title} span={ths.length + 1}>
-          {g.quests.map((q) => <tr key={q.data.id}><th onClick={() => peek(q.data.id)}>{label(pages, q.data.id)}</th>{ths.map((t) => {
-            const f = feeds(q, t.data.id)
-            return <td key={t.data.id} onClick={() => peek(q.data.id)}>{f.map((r, i) => <div key={i}><span className="dot" />{r.vector ?? 'feeds'}{r.note && <small>{r.note}</small>}</div>)}</td>
-          })}</tr>)}
-          {g.id && <tr className="foot"><th>{g.title.split(' · ')[0]} contributors</th>{ths.map((t) => {
+      <div className="toolbar"><h2>{m.title}</h2><label><input type="checkbox" checked={only} onChange={(e) => setOnly(e.target.checked)} /> Only quests that name one</label>
+        <span className="muted">Amber: one quest is the only one in that Act.</span></div>
+      <div className="scroll"><table className="grid matrix">
+        <thead><tr><th>Quest</th>{cols.map((t) => <th key={t.data.id} onClick={() => peek(t.data.id)}>{t.data.title}</th>)}</tr></thead>
+        <tbody>{groups.map((g) => <Group key={g.id} title={g.title} span={cols.length + 1}>
+          {g.quests.map((q) => <tr key={q.data.id}><th onClick={() => peek(q.data.id)}>{label(pages, q.data.id)}</th>{cols.map((t) =>
+            <td key={t.data.id} onClick={() => peek(q.data.id)}>{feeds(q, t.data.id).map((r, i) => <div key={i}><span className="dot" />{shown(r)}{r.note && <small>{r.note}</small>}</div>)}</td>)}</tr>)}
+          {g.id && <tr className="foot"><th>{g.title.split(' · ')[0]} quests</th>{cols.map((t) => {
             const n = g.quests.filter((q) => feeds(q, t.data.id).length)
             return <td key={t.data.id} className={n.length === 1 ? 'alone' : ''}>{n.length}{n.length === 1 && ` · only ${n[0].data.code ?? n[0].data.title}`}</td>
           })}</tr>}
@@ -45,25 +47,29 @@ export function Ledger() {
 const Group = ({ title, span, children }: { title: string; span: number; children: React.ReactNode }) => <><tr className="group"><th colSpan={span}>{title}</th></tr>{children}</>
 
 export function Cast() {
-  const pages = useStore((s) => s.pages)
+  const { pages, schema } = useStore()
   const [all, setAll] = useState(false)
   const [orphans, setOrphans] = useState(false)
+  const kind = castKind(schema)
+  const fields = castFields(schema)
+  const add = fields.find((f) => !f.giver) ?? fields[0]
   const quests = byAct(pages).flatMap((g) => g.quests)
-  const chars = byType(pages, 'character').map((c) => ({ c, cells: quests.map((q) => roles(q.data, c.data.id)) }))
+  const people = byType(pages, kind).map((c) => ({ c, cells: quests.map((q) => roles(schema, q.data, c.data.id)) }))
     .map((x) => ({ ...x, n: x.cells.filter((r) => r.length).length }))
     .filter((x) => (orphans ? !x.n : all || x.n))
-    .sort((a, b) => (a.c.data.tier === 'principal' ? 0 : 1) - (b.c.data.tier === 'principal' ? 0 : 1) || b.n - a.n || a.c.data.title.localeCompare(b.c.data.title))
-  const addExposed = (q: Page, ch: string) => { update(q.data.id, (p) => ({ ...p, data: { ...p.data, exposed: [...(p.data.exposed ?? []), { ref: ch }] } })); toast(`Added ${pages[ch].data.title} as exposed in ${label(pages, q.data.id)}`) }
+    .sort((a, b) => b.n - a.n || a.c.data.title.localeCompare(b.c.data.title))
+  const addTo = (q: Page, ch: string) => { update(q.data.id, (p) => ({ ...p, data: { ...p.data, [add.key]: [...(p.data[add.key] ?? []), { ref: ch }] } })); toast(`Added ${pages[ch].data.title} to ${add.label} in ${label(pages, q.data.id)}`) }
+  const plural = kindOf(schema, kind)?.plural ?? kind
   return (
     <div className="table-view">
-      <div className="toolbar"><h2>Cast matrix</h2>
-        <label><input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} /> All characters</label>
-        <label><input type="checkbox" checked={orphans} onChange={(e) => setOrphans(e.target.checked)} /> Only characters in no quest</label>
-        <span className="muted">I issuer · E exposed · E? exposed if a condition holds · A anchor pressure · M morale. Click an empty cell to add as exposed.</span></div>
+      <div className="toolbar"><h2>Cast</h2>
+        <label><input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} /> All {plural.toLowerCase()}</label>
+        <label><input type="checkbox" checked={orphans} onChange={(e) => setOrphans(e.target.checked)} /> Only those in no quest</label>
+        <span className="muted">{fields.map((f) => `${f.glyph} ${f.label.toLowerCase()}`).join(' · ')} · ? only if a condition holds.{add && ` Click an empty cell to add to ${add.label}.`}</span></div>
       <div className="scroll"><table className="grid cast">
-        <thead><tr><th>Character</th>{quests.map((q) => <th key={q.data.id} onClick={() => peek(q.data.id)} title={q.data.title}>{q.data.code ?? (q.data.title.length > 26 ? q.data.title.slice(0, 24) + '…' : q.data.title)}</th>)}<th>Quests</th></tr></thead>
-        <tbody>{chars.map(({ c, cells, n }) => <tr key={c.data.id}><th onClick={() => peek(c.data.id)}>{c.data.title}{c.data.tier === 'principal' && <small> principal</small>}</th>
-          {cells.map((r, i) => <td key={i} className={r.length ? 'has' : 'empty'} onClick={() => (r.length ? peek(quests[i].data.id) : addExposed(quests[i], c.data.id))}>{r.join(' ')}</td>)}<td>{n}</td></tr>)}</tbody>
+        <thead><tr><th>{kindLabel(schema, kind)}</th>{quests.map((q) => <th key={q.data.id} onClick={() => peek(q.data.id)} title={q.data.title}>{q.data.code ?? (q.data.title.length > 26 ? q.data.title.slice(0, 24) + '…' : q.data.title)}</th>)}<th>Quests</th></tr></thead>
+        <tbody>{people.map(({ c, cells, n }) => <tr key={c.data.id}><th onClick={() => peek(c.data.id)}>{c.data.title}</th>
+          {cells.map((r, i) => <td key={i} className={r.length ? 'has' : 'empty'} onClick={() => (r.length || !add ? peek(quests[i].data.id) : addTo(quests[i], c.data.id))}>{r.join(' ')}</td>)}<td>{n}</td></tr>)}</tbody>
       </table></div>
     </div>
   )
@@ -71,25 +77,31 @@ export function Cast() {
 
 const ORDER: QuestState[] = ['needs', 'link', 'missing', 'duplicate', 'stub', 'built', 'none', 'unknown']
 export function Handoff() {
-  const { pages, engine, project } = useStore()
-  const rows = byType(pages, 'quest').filter((q) => q.data.status !== 'cut' && (q.data.status === 'ready' || q.data.animus?.quest_id))
+  const { pages, engine, project, schema } = useStore()
+  const name = schema.engine?.name ?? 'the engine'
+  const giver = giverField(schema)
+  const kind = castKind(schema)
+  const rows = byType(pages, 'quest').filter((q) => q.data.status !== 'cut' && (q.data.status === 'ready' || q.data.engine?.id))
   const groups = ORDER.map((s) => ({ s, qs: rows.filter((q) => questState(q.data, engine) === s) })).filter((g) => g.qs.length)
-  const missingCast = (q: Page) => new Set([...(q.data.issuer ?? []), ...(q.data.exposed ?? [])].filter((r: Row) => r.ref && pages[r.ref]?.data.type === 'character' && !engine?.characters.includes(pages[r.ref].data.animus?.character_id)).map((r: Row) => r.ref)).size
+  const missingCast = (q: Page) => new Set(castFields(schema).flatMap((f) => (q.data[f.key] ?? []) as Row[])
+    .filter((r) => r.ref && pages[r.ref]?.data.type === kind && !engine?.characters.includes(pages[r.ref].data.engine?.id)).map((r) => r.ref)).size
   return (
     <div className="table-view">
-      <div className="toolbar"><h2>Handoff</h2><span className="muted">Quests marked Ready, and quests that name an Animus id. QuestNotes reads the game folder and never writes to it.</span></div>
-      {!engine && <div className="banner">Connect your game folder to check what exists in Animus. <button onClick={() => useStore.setState({ dialog: 'settings' })}>Settings</button></div>}
+      <div className="toolbar"><h2>Handoff</h2><span className="muted">Quests marked Ready, and quests linked to {name}. QuestNotes reads the game folder and never writes to it.</span></div>
+      {!schema.engine && <div className="banner">No engine link. Name your engine in the project settings to see which quests exist there. <button onClick={() => useStore.setState({ dialog: 'project' })}>Project settings</button></div>}
+      {schema.engine && !engine && <div className="banner">Connect your game folder to check what exists in {name}. <button onClick={() => useStore.setState({ dialog: 'settings' })}>Settings</button></div>}
       {engine?.source === 'snapshot' && <div className="banner">Engine state as of {engine.scanned}, from the committed snapshot. Connect the game folder for live state.</div>}
       {!rows.length && <p className="empty">No quest is Ready for engine yet. Set a quest's status to Ready and it appears here.</p>}
       <div className="scroll"><table className="grid">
-        <thead><tr><th>Quest</th><th>Act</th><th>Status</th><th>Animus id</th><th>Issuer</th><th>Cast missing</th><th>Stages</th><th /></tr></thead>
-        <tbody>{groups.map((g) => <Group key={g.s} title={STATE_LABEL[g.s]} span={8}>{g.qs.map((q) => {
-          const hits = engine?.quests[q.data.animus?.quest_id] ?? []
+        <thead><tr><th>Quest</th><th>Act</th><th>Status</th><th>{schema.engine?.name ?? 'Engine'} id</th><th>{giver?.label ?? ''}</th><th>Cast missing</th><th>Stages</th><th /></tr></thead>
+        <tbody>{groups.map((g) => <Group key={g.s} title={stateLabel(g.s, name)} span={8}>{g.qs.map((q) => {
+          const hits = engine?.quests[q.data.engine?.id] ?? []
+          const by = giver && q.data[giver.key]?.[0]?.ref
           return <tr key={q.data.id}>
             <th onClick={() => peek(q.data.id, true)}>{label(pages, q.data.id)}</th><td>{pages[q.data.act] ? roman(pages[q.data.act].data.order) : '—'}</td><td><StatusPill s={q.data.status} /></td>
-            <td>{q.data.animus?.quest_id ? `${q.data.animus.quest_id} · ${q.data.animus.kind ?? '?'}` : '—'}</td><td>{q.data.issuer?.[0]?.ref ? <Chip id={q.data.issuer[0].ref} /> : '—'}</td>
+            <td>{q.data.engine?.id ? `${q.data.engine.id}${q.data.engine.kind ? ` · ${q.data.engine.kind}` : ''}` : '—'}</td><td>{by ? <Chip id={by} /> : '—'}</td>
             <td>{missingCast(q) || ''}</td><td>{hits[0]?.stages.length ?? ''}</td>
-            <td className="actions"><button onClick={() => peek(q.data.id, true)}>Brief</button>{hits.length === 1 && <button onClick={() => openInAnimus(hits[0].path)}>Open in Animus</button>}</td>
+            <td className="actions"><button onClick={() => peek(q.data.id, true)}>Brief</button>{hits.length === 1 && opensInEditor(schema.engine) && <button onClick={() => openInEngine(hits[0].path)}>Open in {name}</button>}</td>
           </tr>
         })}</Group>)}</tbody>
       </table></div>
@@ -99,8 +111,8 @@ export function Handoff() {
 }
 
 export function Issues() {
-  const { pages, issues: imported, project } = useStore()
-  const list = useMemo(() => issues(pages, imported), [pages, imported])
+  const { pages, issues: imported, project, schema } = useStore()
+  const list = useMemo(() => issues(schema, pages, imported), [schema, pages, imported])
   const dismiss = (text: string) => { const next = imported.filter((x) => x !== text); useStore.setState({ issues: next }); call('view:write', 'issues', { open: next }) }
   const kinds = [...new Set(list.map((i) => i.kind))]
   return (
@@ -114,19 +126,22 @@ export function Issues() {
   )
 }
 
-export function PageList({ type }: { type: PageType }) {
-  const pages = useStore((s) => s.pages)
+export function PageList({ type }: { type: string }) {
+  const { pages, schema } = useStore()
   const list = byType(pages, type)
   const [q, setQ] = useState('')
   const shown = list.filter((p) => `${p.data.code ?? ''} ${p.data.title} ${(p.data.aliases ?? []).join(' ')}`.toLowerCase().includes(q.toLowerCase()))
+  const fields = schema.fields[type] ?? []
+  const select = fields.find((f) => f.kind === 'select'), ref = fields.find((f) => f.kind === 'ref')
+  const k = kindOf(schema, type)
   return (
     <div className="table-view">
-      <div className="toolbar"><h2>{TYPE_INFO[type].plural}</h2><input value={q} placeholder="Filter…" onChange={(e) => setQ(e.target.value)} />
-        <button onClick={async () => peek(await createPage(type, '', type === 'act' ? { order: list.length + 1, subsections: [] } : type === 'questline' ? { order: list.length + 1, kind: 'side' } : {}))}>New {TYPE_INFO[type].label.toLowerCase()}</button></div>
+      <div className="toolbar"><h2>{k?.plural ?? type}</h2><input value={q} placeholder="Filter…" onChange={(e) => setQ(e.target.value)} />
+        <button onClick={async () => peek(await createPage(type, '', type === 'act' ? { order: list.length + 1, subsections: [] } : type === 'questline' ? { order: list.length + 1, kind: 'side' } : {}))}>New {(k?.label ?? type).toLowerCase()}</button></div>
       <div className="scroll"><table className="grid list"><tbody>{shown.map((p) => <tr key={p.data.id} onClick={() => peek(p.data.id)}>
         <th>{label(pages, p.data.id) || <i>Untitled</i>}</th>
-        <td>{type === 'quest' ? <StatusPill s={p.data.status} /> : p.data.tier ?? (p.data.aliases ?? []).join(', ')}</td>
-        <td className="muted">{type === 'character' && p.data.district ? label(pages, p.data.district) : ''}{type === 'quest' && pages[p.data.act] ? `Act ${roman(pages[p.data.act].data.order)}` : ''}</td>
+        <td>{type === 'quest' ? <StatusPill s={p.data.status} /> : (select && p.data[select.key]) ?? (p.data.aliases ?? []).join(', ')}</td>
+        <td className="muted">{ref && p.data[ref.key] ? label(pages, p.data[ref.key]) : ''}</td>
       </tr>)}</tbody></table></div>
     </div>
   )
@@ -134,13 +149,14 @@ export function PageList({ type }: { type: PageType }) {
 
 export function Trash() {
   const [list, setList] = useState<Page[]>([])
+  const schema = useStore((s) => s.schema)
   const refresh = () => call('trash:list').then(setList)
   useEffect(() => { refresh() }, [])
   return (
     <div className="table-view">
       <div className="toolbar"><h2>Trash</h2>{list.length > 0 && <button className="danger" onClick={async () => { if (confirm(`Delete ${list.length} pages for good?`)) { await call('trash:empty'); refresh() } }}>Empty Trash</button>}</div>
       {!list.length && <p className="empty">The Trash is empty.</p>}
-      <table className="grid list"><tbody>{list.map((p) => <tr key={p.file}><th>{p.data.title}</th><td>{TYPE_INFO[p.data.type]?.label}</td>
+      <table className="grid list"><tbody>{list.map((p) => <tr key={p.file}><th>{p.data.title}</th><td>{kindLabel(schema, p.data.type)}</td>
         <td><button onClick={async () => { await call('page:restore', p.file); useStore.setState({ pages: { ...useStore.getState().pages, [p.data.id]: p } }); refresh() }}>Restore</button></td></tr>)}</tbody></table>
     </div>
   )

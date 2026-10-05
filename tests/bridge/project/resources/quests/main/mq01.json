@@ -1,6 +1,6 @@
 {
 	"quest_id": "mq01",
 	"kind": "main",
-	"title": "Welcome to Purgatory",
-	"stages": [{"id": "meet_marcus", "journal": ""}, {"id": "done", "end": "completed"}]
+	"title": "The First Errand",
+	"stages": [{"id": "meet_keeper", "journal": ""}, {"id": "done", "end": "completed"}]
 }

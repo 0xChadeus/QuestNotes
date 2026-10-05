@@ -8,7 +8,8 @@ import path from 'node:path'
 import { importDocs } from '../src/main/importer'
 import { writePage } from '../src/shared/page'
 import * as git from '../src/main/git'
-import { docs } from './fixtures'
+import { resolveSchema } from '../src/shared/schema'
+import { JOBS, docx, h, p as para, synthetic } from './fixtures'
 
 const run = process.env.npm_lifecycle_event === 'test:e2e'
 const shots = process.env.QUESTNOTES_SHOTS
@@ -23,8 +24,8 @@ describe.skipIf(!run)('QuestNotes app', () => {
   const saved = (id: string, what: string | RegExp) => expect.poll(() => file(id), { timeout: 5000 })[typeof what === 'string' ? 'toContain' : 'toMatch'](what as never)
 
   beforeAll(async () => {
-    for (const p of importDocs(docs(), []).pages) { mkdirSync(path.dirname(path.join(lore, p.file)), { recursive: true }); writeFileSync(path.join(lore, p.file), writePage(p.data, p.body)) }
-    writeFileSync(path.join(lore, 'questnotes.yaml'), 'name: Broken Wings\nversion: 1\n')
+    for (const p of importDocs(synthetic, JOBS, resolveSchema(), []).pages) { mkdirSync(path.dirname(path.join(lore, p.file)), { recursive: true }); writeFileSync(path.join(lore, p.file), writePage(p.data, p.body)) }
+    writeFileSync(path.join(lore, 'questnotes.yaml'), 'name: Harbor Tales\nengine: {preset: animus}\nmatrix: {kind: faction, field: factions, title: Faction ledger}\n')
     Object.assign(process.env, { GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.com', GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.com' })
     await git.init(lore)
     const config = mkdtempSync(path.join(tmpdir(), 'qn-config-'))
@@ -44,24 +45,24 @@ describe.skipIf(!run)('QuestNotes app', () => {
     await page.waitForTimeout(500); await shot('1-map')
   })
   it('opens a card beside the map and saves edits to the page file', async () => {
-    await page.locator('.card', { hasText: 'MQ02' }).click(); await page.keyboard.press('Space')
+    await page.locator('.card', { hasText: 'MQ02' }).locator('.card-head').click(); await page.keyboard.press('Space')
     const title = page.locator('.peek .title')
-    await title.fill('Night Life, revised')
-    await saved('q_mq02', 'title: Night Life, revised')
-    await title.fill('Night Life')
+    await title.fill('Night Tide, revised')
+    await saved('q_mq02', 'title: Night Tide, revised')
+    await title.fill('Night Tide')
     await page.locator('.peek .tiptap p').first().click(); await page.keyboard.press('Control+End'); await page.keyboard.type(' Added line.')
     await saved('q_mq02', 'Added line.')
     await shot('2-peek')
   })
-  it('flags a Ready quest that is not in Animus', async () => {
+  it('flags a Ready quest that is not in the engine', async () => {
     await page.locator('.peek .seg button', { hasText: 'Ready for engine' }).click()
-    await page.locator('.peek .animus .badge', { hasText: 'Needs creating in Animus' }).waitFor()
+    await page.locator('.peek .engine-box .badge', { hasText: 'Needs creating in Animus' }).waitFor()
     await page.locator('.card.needs', { hasText: 'MQ02' }).waitFor(); await shot('3-ready')
     await saved('q_mq02', /handoff_on: \d{4}-\d\d-\d\d/)
   })
-  it('renders the ledger, cast matrix, handoff and issues', async () => {
+  it('renders the configured matrix, the cast, handoff and issues', async () => {
     await page.keyboard.press('Escape')
-    for (const [view, sel] of [['Threshold ledger', '.ledger'], ['Cast matrix', '.cast'], ['Handoff', '.grid'], ['Issues', '.toolbar']]) {
+    for (const [view, sel] of [['Faction ledger', '.matrix'], ['Cast', '.cast'], ['Handoff', '.grid'], ['Issues', '.toolbar']]) {
       await page.locator('.sidebar button', { hasText: view }).click(); await page.locator(sel).first().waitFor(); await shot(view)
     }
     await page.locator('.sidebar button', { hasText: 'Handoff' }).click()
@@ -69,12 +70,12 @@ describe.skipIf(!run)('QuestNotes app', () => {
     expect(await page.locator('.brief').textContent()).toContain('res://resources/quests/main/mq02.json')
   })
   it('finds pages from the palette', async () => {
-    await page.keyboard.press('Escape'); await page.keyboard.press('Control+k'); await page.keyboard.type('Lyra Frost'); await page.keyboard.press('Enter')
+    await page.keyboard.press('Escape'); await page.keyboard.press('Control+k'); await page.keyboard.type('Mara Quill'); await page.keyboard.press('Enter')
     await page.locator('.content h4', { hasText: 'In quests' }).waitFor(); await shot('character')
   })
   it('moves a card to another Act, with undo', async () => {
-    await page.locator('.sidebar button', { hasText: 'Map' }).click(); await page.locator('.card').first().waitFor()
-    const from = await center(page.locator('.card', { hasText: 'MQ02' }))
+    await page.locator('.sidebar button', { hasText: 'Map' }).click(); await page.locator('.card').first().waitFor(); await page.waitForTimeout(500)
+    const from = await center(page.locator('.card', { hasText: 'MQ02' }).locator('.card-head'))
     const to = await center(page.locator('.col-heads > div', { hasText: /Act II ·/i }))
     await page.mouse.move(from.x, from.y); await page.mouse.down(); await page.mouse.move(to.x, from.y, { steps: 12 }); await page.mouse.up()
     await saved('q_mq02', /^act: act_2$/m)
@@ -99,7 +100,33 @@ describe.skipIf(!run)('QuestNotes app', () => {
     await hook.dragTo(page.locator('.react-flow__pane'), { targetPosition: { x: 1150, y: 120 } })
     await page.locator('.card', { hasText: name.slice(0, 20) }).waitFor(); await shot('hook-placed')
   })
-  it('wrote the Animus snapshot to the lore folder, never to the game', () => {
-    expect(readFileSync(path.join(lore, 'engine/animus-index.yaml'), 'utf8')).toContain('mq01')
+  it('imports a document through a suggested job and remembers the job', async () => {
+    const doc = docx('More_quests.docx', h(1, 'MQ09 — LOW WATER') + para('Quest giver: Mara Quill') + h(2, 'Description') + para('The harbour drains.'))
+    const docPath = path.join(mkdtempSync(path.join(tmpdir(), 'qn-docs-')), doc.name)
+    writeFileSync(docPath, doc.data)
+    await app.evaluate(({ dialog }, f) => { dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [f] })) as never }, docPath)
+    await page.locator('.sidebar button', { hasText: 'Settings' }).click()
+    await page.getByRole('button', { name: 'Import design documents…' }).click()
+    await page.getByRole('button', { name: 'Choose .docx files…' }).click()
+    expect(await page.locator('.modal textarea.yaml').inputValue()).toContain('kind: quest')
+    await page.locator('.modal pre.outline', { hasText: 'H1 MQ09 — LOW WATER' }).waitFor({ state: 'attached' }); await shot('import-jobs')
+    await page.getByRole('button', { name: 'Preview' }).click()
+    await page.getByRole('button', { name: 'Import 1 page' }).click()
+    await page.locator('.tray .hook', { hasText: 'MQ09' }).waitFor()
+    expect(file('q_mq09')).toContain('- {ref: ch_mara_quill}')
+    expect(readFileSync(path.join(lore, 'questnotes.yaml'), 'utf8')).toMatch(/import:\n  - \{file: More_quests\\\.docx, kind: quest/)
+  })
+  it('edits questnotes.yaml from the project settings', async () => {
+    await page.locator('.sidebar button', { hasText: 'Settings' }).click()
+    await page.getByRole('button', { name: 'Project settings' }).click()
+    const yaml = page.locator('.modal textarea.yaml')
+    expect(await yaml.inputValue()).toContain('preset: animus')
+    await yaml.fill((await yaml.inputValue()).replace('Harbor Tales', 'Harbour Tales')); await shot('project-settings')
+    await page.getByRole('button', { name: 'Save and reload' }).click()
+    await page.locator('.sidebar .project', { hasText: 'Harbour Tales' }).waitFor()
+    expect(readFileSync(path.join(lore, 'questnotes.yaml'), 'utf8')).toContain('name: Harbour Tales')
+  })
+  it('wrote the engine snapshot to the lore folder, never to the game', () => {
+    expect(readFileSync(path.join(lore, 'engine/index.yaml'), 'utf8')).toContain('mq01')
   })
 })

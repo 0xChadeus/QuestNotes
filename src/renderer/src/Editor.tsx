@@ -8,6 +8,7 @@ import { extensions, WikiLink } from '../../shared/markdown'
 import { canonBody, type Page } from '../../shared/page'
 import { useStore, update, peek, createPage } from './store'
 import { label } from './derive'
+import { castKind, kindOf } from '../../shared/schema'
 
 interface Item { label: string; run: (e: TEditor, r: Range) => void }
 
@@ -43,12 +44,13 @@ function popup(): SuggestionOptions<Item>['render'] {
 
 const link = (id: string) => (e: TEditor, r: Range) => e.chain().focus().insertContentAt(r, [{ type: 'wikiLink', attrs: { id } }, { type: 'text', text: ' ' }]).run()
 function mentionItems({ query }: { query: string }): Item[] {
-  const { pages, recent } = useStore.getState()
+  const { pages, recent, schema } = useStore.getState()
   const q = query.toLowerCase()
   const hits = Object.values(pages).filter((p) => `${p.data.code ?? ''} ${p.data.title} ${(p.data.aliases ?? []).join(' ')}`.toLowerCase().includes(q))
   hits.sort((a, b) => (recent.indexOf(b.data.id) + 1) - (recent.indexOf(a.data.id) + 1) || a.data.title.length - b.data.title.length)
   const items: Item[] = hits.slice(0, 8).map((p) => ({ label: label(pages, p.data.id), run: link(p.data.id) }))
-  if (query.trim()) items.push({ label: `New character “${query.trim()}”`, run: async (e, r) => link(await createPage('character', query.trim(), { tier: 'named only' }))(e, r) })
+  const kind = kindOf(schema, castKind(schema))
+  if (query.trim() && kind) items.push({ label: `New ${kind.label.toLowerCase()} “${query.trim()}”`, run: async (e, r) => link(await createPage(kind.id, query.trim()))(e, r) })
   return items
 }
 const block = (name: string, run: (e: TEditor) => void): Item => ({ label: name, run: (e, r) => { e.chain().focus().deleteRange(r).run(); run(e) } })
@@ -59,7 +61,7 @@ const BLOCKS = [
   block('Numbered list', (e) => e.chain().toggleOrderedList().run()),
   block('Quote', (e) => e.chain().toggleBlockquote().run()),
   block('Table', (e) => e.chain().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run()),
-  block('Branching surfaces table', (e) => e.chain().insertContent('<h2>Branching surfaces</h2><table><tr><th>Branch condition</th><th>Outcome</th><th>Pays off in</th></tr><tr><td></td><td></td><td></td></tr></table>').run()),
+  block('Branch table', (e) => e.chain().insertContent(`<h2>${useStore.getState().schema.branches}</h2><table><tr><th>Condition</th><th>Outcome</th><th>Pays off in</th></tr><tr><td></td><td></td><td></td></tr></table>`).run()),
 ]
 
 const suggest = (char: string, items: SuggestionOptions<Item>['items']) => (editor: TEditor) => Suggestion<Item>({

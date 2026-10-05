@@ -1,98 +1,112 @@
-// The lore model: nine page kinds taken from the Broken Wings design documents, and the fields each one carries.
-export const TYPES = ['quest', 'questline', 'act', 'character', 'faction', 'district', 'threshold', 'leak', 'mystery'] as const
-export type PageType = (typeof TYPES)[number]
-
-export const TYPE_INFO: Record<PageType, { label: string; plural: string; dir: string; prefix: string }> = {
-  quest: { label: 'Quest', plural: 'Quests', dir: 'quests', prefix: 'q' },
-  questline: { label: 'Questline', plural: 'Questlines', dir: 'questlines', prefix: 'ql' },
-  act: { label: 'Act', plural: 'Acts', dir: 'acts', prefix: 'act' },
-  character: { label: 'Character', plural: 'Characters', dir: 'characters', prefix: 'ch' },
-  faction: { label: 'Faction', plural: 'Factions', dir: 'factions', prefix: 'fa' },
-  district: { label: 'District', plural: 'Districts', dir: 'districts', prefix: 'di' },
-  threshold: { label: 'Threshold', plural: 'Thresholds', dir: 'thresholds', prefix: 'th' },
-  leak: { label: 'Leak channel', plural: 'Leak channels', dir: 'leaks', prefix: 'lc' },
-  mystery: { label: 'Mystery', plural: 'Mysteries', dir: 'mysteries', prefix: 'my' },
-}
+// The lore model. Quests, questlines and acts are built in; every other page kind, and the fields of every kind, come
+// from the project's questnotes.yaml, over a general default.
+import { resolveEngine, type EngineConfig } from './engine'
 
 export const STATUSES = ['idea', 'outline', 'draft', 'review', 'ready', 'cut'] as const
 export type Status = (typeof STATUSES)[number]
 export const STATUS_LABEL: Record<Status, string> = {
   idea: 'Idea', outline: 'Outline', draft: 'Draft', review: 'Review', ready: 'Ready for engine', cut: 'Cut',
 }
-export const ARCHETYPES = ['aligned', 'divergent', 'exposure']
 
-/** One entry of a list field: a page reference or free text, plus the docs' qualifiers. `none` is an explicit "None". */
-export interface Row {
-  ref?: string; text?: string; none?: boolean
-  note?: string; condition?: string; weight?: string; direction?: string; anchor?: string; vector?: string
-}
-type Extra = 'note' | 'condition' | 'weight' | 'direction' | 'anchor' | 'vector'
-export const EXTRA_OPTIONS: Partial<Record<Extra, string[]>> = {
-  direction: ['toward renown', 'toward notoriety', 'up', 'down', 'depends'],
-  anchor: ['material', 'identity', 'bond', 'fear', 'belief'],
-}
+/** One entry of a list field: a page reference or free text, plus qualifiers named by the field. `none` is an explicit "None". */
+export type Row = { ref?: string; text?: string; none?: boolean } & Record<string, any>
+export type Extra = string | { key: string; options: string[] }
 
 export interface Field {
   key: string; label: string
   kind: 'text' | 'long' | 'select' | 'ref' | 'rows' | 'tags' | 'number' | 'subsection'
-  to?: PageType[]; extras?: Extra[]; options?: string[]; optional?: boolean; effect?: boolean
+  to?: string[]; extras?: Extra[]; options?: string[]
+  optional?: boolean; required?: boolean; effect?: boolean; giver?: boolean
+  glyph?: string; aliases?: string[]
+}
+export interface Kind { id: string; label: string; plural: string; prefix: string; dir: string; color?: string }
+
+/** How design documents become pages; see the import dialog. */
+export interface ImportJob {
+  file: string; kind: string
+  level?: number; under?: string; match?: string; skip?: string; pattern?: string
+  group?: { field: string; skip?: string }; set?: Record<string, unknown>; hooks?: string; create?: string[]
+  /** Extra names for pages by title, so prose that says "the Guild" finds "The Guild of the Fallen". */
+  aliases?: Record<string, string[]>
 }
 
-const rows = (key: string, label: string, to: PageType[], extras: Extra[], more: Partial<Field> = {}): Field =>
-  ({ key, label, kind: 'rows', to, extras, ...more })
+export interface ProjectConfig {
+  name?: string
+  kinds?: (Partial<Kind> & { id: string; label: string })[]
+  fields?: Record<string, Field[]>
+  template?: Record<string, string>
+  required_sections?: string[]
+  branches?: string
+  matrix?: { kind: string; field: string; title: string }
+  engine?: Partial<EngineConfig>
+  import?: ImportJob[]
+}
+
+export interface Schema {
+  kinds: Kind[]; fields: Record<string, Field[]>; template: Record<string, string>
+  required: string[]; branches: string; matrix?: ProjectConfig['matrix']; engine?: EngineConfig
+}
+
+const BUILTIN: Kind[] = [
+  { id: 'quest', label: 'Quest', plural: 'Quests', prefix: 'q', dir: 'quests', color: '#9a3b22' },
+  { id: 'questline', label: 'Questline', plural: 'Questlines', prefix: 'ql', dir: 'questlines' },
+  { id: 'act', label: 'Act', plural: 'Acts', prefix: 'act', dir: 'acts' },
+]
+const rows = (key: string, label: string, to: string[], extras: Extra[], more: Partial<Field> = {}): Field => ({ key, label, kind: 'rows', to, extras, ...more })
 const aliases: Field = { key: 'aliases', label: 'Aliases', kind: 'tags' }
 
-export const FIELDS: Record<PageType, Field[]> = {
-  quest: [
-    { key: 'act', label: 'Act', kind: 'ref', to: ['act'] },
-    { key: 'subsection', label: 'Sub-section', kind: 'subsection' },
-    { key: 'questline', label: 'Questline', kind: 'ref', to: ['questline'] },
-    rows('issuer', 'Issuer', ['character'], ['note']),
-    rows('sanctioning', 'Sanctioning sub-factions', ['faction'], ['note']),
-    rows('exposed', 'Exposed characters', ['character', 'faction'], ['weight', 'condition', 'note']),
-    rows('renown', 'Renown impact', ['district'], ['direction', 'note'], { effect: true }),
-    rows('anchor_pressure', 'Anchor pressure', ['character'], ['anchor', 'note'], { effect: true }),
-    rows('morale', 'Morale impact', ['character'], ['direction', 'note'], { effect: true }),
-    rows('thresholds', 'Threshold contributions', ['threshold'], ['vector', 'note'], { effect: true }),
-    rows('leaks', 'Leak channels', ['leak', 'character'], ['condition'], { effect: true }),
-    rows('leads_to', 'Leads to', ['quest'], ['note']),
-    { key: 'time_pressure', label: 'Time pressure', kind: 'text', optional: true },
-    rows('companions', 'Companion availability', ['character'], ['note'], { optional: true }),
+export const DEFAULT_CONFIG: ProjectConfig = {
+  kinds: [
+    { id: 'character', label: 'Character', prefix: 'ch', color: '#a0607a' }, { id: 'faction', label: 'Faction', prefix: 'fa', color: '#b38b35' },
+    { id: 'location', label: 'Location', prefix: 'lo', color: '#5f8a5a' }, { id: 'secret', label: 'Secret', prefix: 'se', color: '#2c5d74' },
   ],
-  questline: [{ key: 'kind', label: 'Kind', kind: 'select', options: ['main', 'side', 'emergent'] }, { key: 'order', label: 'Order', kind: 'number' }],
-  act: [{ key: 'order', label: 'Order', kind: 'number' }, { key: 'subsections', label: 'Sub-sections', kind: 'tags' }],
-  character: [
-    aliases,
-    { key: 'tier', label: 'Tier', kind: 'select', options: ['principal', 'side', 'named only'] },
-    { key: 'district', label: 'District', kind: 'ref', to: ['district'] },
-    rows('factions', 'Factions', ['faction'], ['note']),
-    rows('anchors', 'Anchors', [], ['anchor', 'note']),
-    { key: 'role_in_play', label: 'Role in play', kind: 'long', optional: true },
-  ],
-  faction: [aliases, { key: 'parent', label: 'Part of', kind: 'ref', to: ['faction'] }],
-  district: [aliases, { key: 'area_id', label: 'Engine area id', kind: 'text', optional: true }],
-  threshold: [aliases, { key: 'resolves_in', label: 'Resolves in', kind: 'ref', to: ['quest'], optional: true }],
-  leak: [aliases, { key: 'owner', label: 'Run by', kind: 'ref', to: ['character', 'faction'] }],
-  mystery: [aliases, rows('known_by', 'Who knows', ['character', 'faction'], ['note'])],
+  fields: {
+    quest: [
+      rows('giver', 'Quest giver', ['character'], ['note'], { giver: true, required: true, glyph: 'G' }),
+      rows('involved', 'Involved', ['character', 'faction'], ['condition', 'note'], { glyph: 'I' }),
+      rows('locations', 'Locations', ['location'], ['note']),
+      rows('factions', 'Faction standing', ['faction'], [{ key: 'direction', options: ['up', 'down', 'depends'] }, 'note'], { effect: true }),
+      rows('reveals', 'Reveals', ['secret'], ['note'], { effect: true }),
+      { key: 'requirements', label: 'Requirements', kind: 'long', optional: true },
+      { key: 'rewards', label: 'Rewards', kind: 'long', optional: true },
+    ],
+    character: [aliases, { key: 'role', label: 'Role', kind: 'select', options: ['major', 'minor', 'named only'] }, { key: 'faction', label: 'Faction', kind: 'ref', to: ['faction'] }, { key: 'home', label: 'Home', kind: 'ref', to: ['location'] }],
+    faction: [aliases, { key: 'parent', label: 'Part of', kind: 'ref', to: ['faction'] }],
+    location: [aliases, { key: 'parent', label: 'Part of', kind: 'ref', to: ['location'] }],
+    secret: [aliases, rows('known_by', 'Who knows', ['character', 'faction'], ['note'])],
+  },
+  template: { quest: '## Description\n\n## Expected path\n\n## Branches\n\n| Condition | Outcome | Pays off in |\n| --- | --- | --- |\n|  |  |  |\n\n## Notes\n' },
+  required_sections: ['Description', 'Expected path', 'Branches'],
+  branches: 'Branches',
 }
 
-/** Quest completeness, as the Quest Index defines a finished entry: 9 schema fields, a description, 3 vectors, a branch. */
-export const REQUIRED_QUEST_FIELDS = ['act', 'issuer', 'sanctioning', 'exposed', 'renown', 'anchor_pressure', 'morale', 'thresholds']
-export const QUEST_TEMPLATE = `## Description
+export function resolveSchema(c: ProjectConfig = {}): Schema {
+  const custom = !!c.kinds
+  const kinds = [...BUILTIN, ...(c.kinds ?? DEFAULT_CONFIG.kinds!).filter((k) => !BUILTIN.some((b) => b.id === k.id))
+    .map((k) => ({ plural: `${k.label}s`, prefix: k.id.slice(0, 3), dir: `${k.id}s`, ...k }))]
+  const ids = new Set(kinds.map((k) => k.id))
+  const given = c.fields ?? (custom ? {} : DEFAULT_CONFIG.fields!)
+  const known = (fs: Field[]) => fs.map((f) => (f.to ? { ...f, to: f.to.filter((t) => ids.has(t)) } : f))
+  const fields: Record<string, Field[]> = {
+    quest: known([{ key: 'act', label: 'Act', kind: 'ref', to: ['act'] }, { key: 'subsection', label: 'Sub-section', kind: 'subsection' },
+      { key: 'questline', label: 'Questline', kind: 'ref', to: ['questline'] }, ...(given.quest ?? []), rows('leads_to', 'Leads to', ['quest'], ['note'])]),
+    questline: [{ key: 'kind', label: 'Kind', kind: 'select', options: ['main', 'side', 'emergent'] }, { key: 'order', label: 'Order', kind: 'number' }],
+    act: [{ key: 'order', label: 'Order', kind: 'number' }, { key: 'subsections', label: 'Sub-sections', kind: 'tags' }],
+  }
+  for (const k of kinds) if (!fields[k.id]) fields[k.id] = known(given[k.id] ?? [aliases])
+  return {
+    kinds, fields, engine: resolveEngine(c.engine), matrix: c.matrix && ids.has(c.matrix.kind) ? c.matrix : undefined,
+    template: { ...(custom ? {} : DEFAULT_CONFIG.template), ...c.template },
+    required: c.required_sections ?? (custom ? [] : DEFAULT_CONFIG.required_sections!),
+    branches: c.branches ?? DEFAULT_CONFIG.branches!,
+  }
+}
 
-## Execution vectors
-
-### Method
-
-### Collateral
-
-### Disclosure
-
-## Branching surfaces
-
-| Branch condition | Outcome | Pays off in |
-| --- | --- | --- |
-|  |  |  |
-
-## Developer note
-`
+export const kindOf = (s: Schema, id: string) => s.kinds.find((k) => k.id === id)
+export const extraKey = (x: Extra) => (typeof x === 'string' ? x : x.key)
+/** The kind of page the cast matrix lists: whatever a quest giver is, characters by default. */
+export const castKind = (s: Schema) => s.fields.quest.find((f) => f.giver)?.to?.[0] ?? 'character'
+export const giverField = (s: Schema) => s.fields.quest.find((f) => f.giver)
+/** The rows fields of quests that name characters, with the letter the cast matrix shows for each. */
+export const castFields = (s: Schema, kind = castKind(s)) =>
+  (s.fields.quest ?? []).filter((f) => f.kind === 'rows' && f.to?.includes(kind) && f.key !== 'leads_to').map((f) => ({ ...f, glyph: f.glyph ?? f.label[0].toUpperCase() }))

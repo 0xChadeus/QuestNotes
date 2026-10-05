@@ -1,21 +1,24 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell, type IpcMainInvokeEvent } from 'electron'
 import { autoUpdater } from 'electron-updater'
 import { readFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import path from 'node:path'
 import type { FSWatcher } from 'node:fs'
 import { Workspace } from './workspace'
 import * as git from './git'
 import * as settings from './settings'
-import { Bridge, findGodot, scan, watchGame } from './animus'
-import { importDocs } from './importer'
+import { Bridge, findGodot, scan, watchGame } from './engine'
+import { describe, importDocs, suggest } from './importer'
 import type { EngineIndex } from '../shared/engine'
 import type { Events, Invoke, Project } from '../shared/api'
 
 let win: BrowserWindow | undefined
 let ws: Workspace | undefined
 let bridge: Bridge | undefined
-let gameWatch: FSWatcher | null = null
+let gameWatch: FSWatcher[] = []
 let engine: EngineIndex | null = null
+let docs: { name: string; data: Uint8Array }[] = []
+const SNAPSHOT = 'engine/index.yaml'
 
 const send = <K extends keyof Events>(event: K, ...args: Parameters<Events[K]>) => win?.webContents.send(event, ...args)
 const trusted = (e: IpcMainInvokeEvent) => {
@@ -31,31 +34,35 @@ function handle<K extends keyof Invoke>(channel: K, fn: (...args: Parameters<Inv
 const need = () => { if (!ws) throw new Error('no project open'); return ws }
 
 async function connectGame(game: string | undefined) {
-  gameWatch?.close(); bridge?.close()
-  bridge = new Bridge(game, (s) => send('bridge:state', s))
-  if (!game) { engine = (await need().readYaml('engine/animus-index.yaml')) ?? null; if (engine) engine.source = 'snapshot'; return }
+  gameWatch.forEach((w) => w.close()); bridge?.close()
+  const e = need().schema.engine
+  bridge = new Bridge(e ? game : undefined, (s) => send('bridge:state', s), e?.adapter)
+  engine = null
+  if (!e) return
+  if (!game) { engine = (await need().readYaml(SNAPSHOT)) ?? null; if (engine) engine.source = 'snapshot'; return }
   const rescan = async () => {
-    engine = await scan(game)
-    const snap = await need().readYaml('engine/animus-index.yaml')
+    engine = await scan(game, e)
+    const snap = await need().readYaml(SNAPSHOT)
     const same = (a: EngineIndex | null) => JSON.stringify([a?.quests, a?.characters])
-    if (same(snap) !== same(engine)) await need().writeYaml('engine/animus-index.yaml', { ...engine, source: undefined })
+    if (same(snap) !== same(engine)) await need().writeYaml(SNAPSHOT, { ...engine, source: undefined })
     send('engine:index', engine)
   }
   await rescan()
-  gameWatch = watchGame(game, rescan)
+  gameWatch = watchGame(game, e, rescan)
 }
 
 async function openProject(root: string): Promise<Project> {
   ws?.close()
   ws = new Workspace(root)
   settings.remember(root)
+  await ws.loadConfig()
   const { pages, errors } = await ws.loadAll()
   ws.watch((file, page) => send('page:changed', file, page))
   const s = settings.load()
   await connectGame(s.games[root])
   for (const p of pages) for (const w of p.data.title.split(/[\s,.’'-]+/)) if (w.length > 2) win?.webContents.session.addWordToSpellCheckerDictionary(w)
   return {
-    root, name: await ws.name(), pages, errors, map: (await ws.readYaml('views/map.yaml')) ?? {}, git: await git.status(root),
+    root, config: ws.config, pages, errors, map: (await ws.readYaml('views/map.yaml')) ?? {}, git: await git.status(root),
     engine, bridge: bridge!.state, game: s.games[root], godot: s.godot ?? findGodot(), issues: (await ws.readYaml('views/issues.yaml'))?.open ?? [],
   }
 }
@@ -79,31 +86,39 @@ handle('git:sync', () => git.sync(need().root))
 handle('git:finish', (resolved) => git.finish(need().root, resolved))
 handle('git:history', (file, since) => git.history(need().root, file, since))
 handle('git:setRemote', (url) => git.setRemote(need().root, url))
-handle('animus:pickGame', async () => {
+handle('project:saveConfig', async (config) => { await need().saveConfig(config); return openProject(need().root) })
+handle('engine:pickGame', async () => {
   const game = (await pick('Choose the game folder', ['openDirectory']))[0]
   if (game) { settings.update((s) => { s.games[need().root] = game }); await connectGame(game) }
   return { game, engine }
 })
-handle('animus:pickGodot', async () => {
+handle('engine:pickGodot', async () => {
   const godot = (await pick('Choose the Godot executable', ['openFile']))[0] ?? null
   if (godot) settings.update((s) => { s.godot = godot })
   return godot
 })
-handle('animus:open', async (resPath, stage) => {
-  if (bridge?.state === 'open') return bridge.open(resPath, stage)
+handle('engine:open', async (target, stage) => {
+  if (bridge?.state === 'open') return bridge.open(target, stage)
   const godot = settings.load().godot ?? findGodot()
   if (!bridge || bridge.state === 'no-game') return { ok: false, error: 'no-game' }
   if (!godot) return { ok: false, error: 'no-godot' }
-  bridge.start(godot, resPath, stage)
+  bridge.start(godot, target, stage)
   return { ok: true, started: true }
 })
 handle('import:pick', async () => {
   const paths = await pick('Choose the design documents', ['openFile', 'multiSelections'], [{ name: 'Word documents', extensions: ['docx'] }])
-  if (!paths.length) return null
-  const files = await Promise.all(paths.map(async (p) => ({ name: path.basename(p), data: new Uint8Array(await readFile(p)) })))
-  return importDocs(files, (await need().loadAll()).pages)
+  docs = await Promise.all(paths.map(async (p) => ({ name: path.basename(p), data: new Uint8Array(await readFile(p)) })))
+  const saved = need().config.import?.filter((j) => docs.some((d) => d.name === j.file))
+  return { files: describe(docs), suggested: saved?.length ? saved : suggest(docs, need().schema) }
 })
-handle('import:commit', async (pages) => { for (const p of pages) await need().write(p) })
+handle('import:preview', async (jobs) => importDocs(docs, jobs, need().schema, (await need().loadAll()).pages))
+handle('import:commit', async (pages, jobs) => {
+  for (const p of pages) await need().write(p)
+  const keep = (need().config.import ?? []).filter((j) => !jobs.some((k) => k.file === j.file))
+  await need().saveConfig({ ...need().config, import: [...keep, ...jobs] })
+  docs = []
+  return need().config
+})
 handle('shell:open', async (file) => { await shell.openPath(need().abs(file)) })
 handle('shell:addon', async () => { await shell.openPath(path.join(app.isPackaged ? process.resourcesPath : app.getAppPath(), 'bridge/addons')) })
 
@@ -124,9 +139,13 @@ function createWindow() {
   else win.loadFile(path.join(__dirname, '../renderer/index.html'))
 }
 
+// One window per user: launching again (from the dock, say) brings the open window forward.
+if (!app.requestSingleInstanceLock()) app.quit()
+app.on('second-instance', () => { if (win) { if (win.isMinimized()) win.restore(); win.focus() } })
+
 app.whenReady().then(() => {
   Menu.setApplicationMenu(process.platform === 'darwin' ? Menu.buildFromTemplate([{ role: 'appMenu' }, { role: 'editMenu' }, { role: 'windowMenu' }]) : null)
   createWindow()
-  if (app.isPackaged) autoUpdater.checkForUpdatesAndNotify().catch(() => {})
+  if (app.isPackaged && existsSync(path.join(process.resourcesPath, 'app-update.yml'))) autoUpdater.checkForUpdatesAndNotify().catch(() => {})
 })
-app.on('window-all-closed', () => { ws?.close(); bridge?.close(); gameWatch?.close(); app.quit() })
+app.on('window-all-closed', () => { ws?.close(); bridge?.close(); gameWatch.forEach((w) => w.close()); app.quit() })
