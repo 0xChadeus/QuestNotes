@@ -1,0 +1,10 @@
+config_version=5
+
+[application]
+
+config/name="questnotes_bridge_test"
+config/features=PackedStringArray("4.7")
+
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/mock_animus/plugin.cfg", "res://addons/questnotes_bridge/plugin.cfg")
