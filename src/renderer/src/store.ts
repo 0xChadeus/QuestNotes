@@ -271,6 +271,29 @@ export async function duplicate(id: string) {
   peek(nid)
 }
 
+/** Copies of quests, placed (dx, dy) from the originals; "leads to" links among the copied quests point at the copies. */
+export async function duplicateAll(ids: string[], dx = 40, dy = 40) {
+  const made = new Map<string, string>()
+  await batch(`Duplicate ${named(ids, 'quest')}`, async () => {
+    for (const id of ids) {
+      const p = get().pages[id]
+      if (!p) continue
+      const { id: _, engine: __, code: ___, ...data } = p.data
+      const title = `${p.data.title || 'Untitled'} (copy)`
+      made.set(id, await createPage(p.data.type, title, { ...data, title, ...(data.status === 'ready' ? { status: 'draft' as Status } : {}) }, p.body))
+    }
+    const at: Record<string, { x: number; y: number }> = {}
+    for (const [from, to] of made) {
+      const links = (get().pages[to]?.data.leads_to ?? []) as { ref?: string }[]
+      if (links.some((r) => r.ref && made.has(r.ref))) setData(to, { leads_to: links.map((r) => (r.ref && made.has(r.ref) ? { ...r, ref: made.get(r.ref) } : r)) })
+      const n = get().map.nodes?.find((x) => x.id === from)
+      if (n) at[to] = { x: n.x + dx, y: n.y + dy }
+    }
+    if (Object.keys(at).length) placeCards(at)
+  })
+  return made
+}
+
 /** Moves a page one place earlier or later among pages of its kind, renumbering their `order`. */
 export function reorder(id: string, dir: -1 | 1) {
   const p = get().pages[id]

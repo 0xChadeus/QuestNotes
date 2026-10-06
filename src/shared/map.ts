@@ -5,7 +5,8 @@ import type { Data } from './page'
 export const CARD_W = 230, CARD_H = 116, NOTE_W = 220, NOTE_H = 120
 export interface MapNode { id: string; x: number; y: number }
 export interface MapFrame extends MapNode { label: string; w: number; h: number; color?: number }
-export interface MapNote extends MapNode { text: string }
+/** A note: free text on the canvas. Colour 0 (or none) is the usual yellow; 1–6 are the area colours. */
+export interface MapNote extends MapNode { text: string; w?: number; h?: number; color?: number }
 /** Version 2. Version 1 (the act × questline grid) held only `cells`, the order of cards inside each grid cell. */
 export interface MapView { version?: number; nodes?: MapNode[]; frames?: MapFrame[]; notes?: MapNote[]; cells?: Record<string, string[]> }
 type Key = 'nodes' | 'frames' | 'notes'
@@ -121,7 +122,7 @@ export function toCanvas(m: MapView, files: Record<string, string>, links: Link[
   const nodes = [
     ...(m.frames ?? []).map((f) => ({ id: f.id, type: 'group', label: f.label, x: f.x, y: f.y, width: f.w, height: f.h, ...(f.color ? { color: String(f.color) } : {}) })),
     ...(m.nodes ?? []).filter((n) => files[n.id]).map((n) => ({ id: n.id, type: 'file', file: files[n.id], x: n.x, y: n.y, width: CARD_W, height: CARD_H })),
-    ...(m.notes ?? []).map((n) => ({ id: n.id, type: 'text', text: n.text, x: n.x, y: n.y, width: NOTE_W, height: NOTE_H })),
+    ...(m.notes ?? []).map((n) => ({ id: n.id, type: 'text', text: n.text, x: n.x, y: n.y, width: n.w ?? NOTE_W, height: n.h ?? NOTE_H })),
   ]
   const edges = links.filter((l) => placed.has(l.from) && placed.has(l.to))
     .map((l, i) => ({ id: `e${i}`, fromNode: l.from, fromSide: 'right', toNode: l.to, toSide: 'left', ...(l.label ? { label: l.label, color: '1' } : {}) }))
@@ -135,6 +136,7 @@ export function fromCanvas(text: string, ids: Record<string, string>): MapView {
   return tidyMap({
     nodes: ns.filter((n) => n.type === 'file' && n.file && ids[n.file]).map((n) => ({ id: ids[n.file!], x: n.x, y: n.y })),
     frames: ns.filter((n) => n.type === 'group').map((n) => ({ id: `f_${n.id}`.replace(/^f_f_/, 'f_'), label: n.label ?? '', x: n.x, y: n.y, w: n.width, h: n.height, ...(+(n.color ?? 0) >= 1 && +(n.color ?? 0) <= 6 ? { color: +n.color! } : {}) })),
-    notes: ns.filter((n) => n.type === 'text').map((n) => ({ id: `n_${n.id}`.replace(/^n_n_/, 'n_'), text: n.text ?? '', x: n.x, y: n.y })),
+    notes: ns.filter((n) => n.type === 'text').map((n) => ({ id: `n_${n.id}`.replace(/^n_n_/, 'n_'), text: n.text ?? '', x: n.x, y: n.y,
+      ...(n.width !== NOTE_W || n.height !== NOTE_H ? { w: n.width, h: n.height } : {}) })),
   })
 }

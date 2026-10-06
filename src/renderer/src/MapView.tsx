@@ -1,38 +1,47 @@
-// The quest map: one free canvas. Quests sit where the designer puts them (views/map.yaml), frames and notes are drawn on
-// it, links come from the lore. Acts and questlines show as colours and badges on the cards, never as layout.
+// The quest map: one free canvas. Quests sit where the designer puts them (views/map.yaml); areas and notes are drawn on
+// it; links come from the lore. Acts and questlines show as colours and badges on the cards, never as layout.
+// (Areas are stored as `frames` in the map file.)
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { create } from 'zustand'
 import {
-  ReactFlow, Handle, Position, MiniMap, ViewportPortal, MarkerType, NodeResizer, SelectionMode, applyNodeChanges, useReactFlow, useStore as useFlow,
+  ReactFlow, Handle, Position, MiniMap, Controls, ViewportPortal, MarkerType, NodeResizer, NodeToolbar, SelectionMode, applyNodeChanges, useReactFlow, useStore as useFlow,
   type Node, type Edge, type NodeProps, type NodeChange, type NodePositionChange, type Connection, type FinalConnectionState,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import {
-  useStore, update, peek, openFull, writeMap, placeCards, toast, toggleFilter, batch, lastChange, undo, trashPages, ask, pick, targets, unplace, setStatus,
-  createQuest, setMiddle, type MenuItem,
+  useStore, update, peek, openFull, writeMap, placeCards, toast, toggleFilter, batch, lastChange, undo, trashPages, pick, targets, unplace, setStatus,
+  createQuest, setMiddle, duplicateAll, type MenuItem,
 } from './store'
 import { call } from './api'
 import { byType, label, links, type QuestLink } from './derive'
 import { addPayoff, branches, refsOf, removePayoff, type Data } from '../../shared/page'
 import { questState, stateLabel, type EngineIndex } from '../../shared/engine'
 import { kindStyle, openMenu, pageMenu } from './ui'
-import { CARD_H, CARD_W, NOTE_H, NOTE_W, align, edit, fromCanvas, moveItems, place, toCanvas, type Align } from '../../shared/map'
+import { CARD_H, CARD_W, NOTE_H, NOTE_W, align, edit, fromCanvas, moveItems, place, toCanvas, type Align, type MapFrame, type MapNote, type MapView as MapData } from '../../shared/map'
 import { STATUSES, STATUS_LABEL, type Row, type Schema } from '../../shared/schema'
 import { layered } from './tidy'
 
-/** Six colours, by act order for card stripes and by choice for frames: [stripe, frame fill, frame edge, name]. */
+/** Six colours, by act order for card stripes and by choice for areas and notes: [stripe, fill, edge, name]. */
 const COLORS = [['#9a3b22', '#f3e6df', '#c48a72', 'Rust'], ['#2c5d74', '#e2ecf1', '#7fa3b6', 'Blue'], ['#4f7a48', '#e5eee2', '#87a97f', 'Green'],
   ['#7a5ea8', '#ece6f3', '#a08bbd', 'Violet'], ['#a07d2c', '#f3ecd9', '#c4a35a', 'Ochre'], ['#9a5574', '#f3e5ec', '#b98aa0', 'Rose']]
+const NOTE_FILL = '#f3e3a6'
 const TONE: Record<string, string> = { idea: '#b9b2a4', outline: '#8fa8b8', draft: '#c4a35a', review: '#8a6fb0', ready: '#4f8a4a', cut: '#999' }
 const S = useStore.getState
 
+/** What only the map needs: selected areas and notes, the one being edited in place, and the drawing tool in hand. */
+const useUi = create<{ picked: string[]; editing: string | null; tool: 'area' | 'note' | null }>(() => ({ picked: [], editing: null, tool: null }))
+const U = useUi.getState
+
 type Card = { code?: string; title: string; synopsis: string; status: string; stripe: string; line?: string; chips: [string, string, string?][]; branches: string[]; needs?: string; badges: string[]; dim: boolean }
-type Frame = { label: string; color: number; on: boolean }
+type Area = { label: string; color: number }
+type Note = { text: string; color: number }
 
 const QuestCard = memo(({ data, selected }: NodeProps<Node<Card>>) => {
   const level = useFlow((s) => (s.transform[2] < 0.55 ? 'far' : s.transform[2] > 1.3 ? 'near' : 'mid'))
   return <>
     <Handle type="target" position={Position.Left} />
-    <div className={`card z-${level}${data.dim ? ' dim' : ''}${selected ? ' sel' : ''}${data.needs ? ' needs' : ''}`} style={{ borderTopColor: data.stripe }} title={data.needs}>
+    <div className={`card z-${level}${data.dim ? ' dim' : ''}${selected ? ' sel' : ''}${data.needs ? ' needs' : ''}`} style={{ borderTopColor: data.stripe }}
+      title={[[data.code, data.title].filter(Boolean).join(' '), data.synopsis, data.needs].filter(Boolean).join('\n')}>
       {level === 'far' ? <div className="card-far">{data.code || data.title || 'Untitled'}</div> : <>
         <div className="card-head"><b>{data.code}</b> {data.title || <i className="muted">Untitled</i>}</div>
         <div className="card-syn">{data.synopsis}</div>
@@ -49,52 +58,135 @@ const QuestCard = memo(({ data, selected }: NodeProps<Node<Card>>) => {
   </>
 })
 
-const FrameNode = memo(({ id, data }: NodeProps<Node<Frame>>) => {
+/** Text edited where it stands: Enter (Ctrl+Enter in a note) or a click away keeps it, Escape puts back what was there. */
+function Inline({ value, multi, className, onDone }: { value: string; multi?: boolean; className: string; onDone: (v: string) => void }) {
+  const cancel = useRef(false)
+  const props = {
+    className: `${className} nodrag nowheel`, autoFocus: true, defaultValue: value, spellCheck: true,
+    onFocus: (e: React.FocusEvent<HTMLInputElement & HTMLTextAreaElement>) => e.target.select(),
+    onBlur: (e: React.FocusEvent<HTMLInputElement & HTMLTextAreaElement>) => { useUi.setState({ editing: null }); onDone(cancel.current ? value : e.target.value) },
+    onKeyDown: (e: React.KeyboardEvent<HTMLInputElement & HTMLTextAreaElement>) => {
+      e.stopPropagation()
+      if (e.key === 'Escape') { cancel.current = true; e.currentTarget.blur() }
+      if (e.key === 'Enter' && (!multi || e.ctrlKey || e.metaKey)) { e.preventDefault(); e.currentTarget.blur() }
+    },
+  }
+  return multi ? <textarea {...props} /> : <input {...props} />
+}
+
+function Swatches({ id, kind, current }: { id: string; kind: 'frames' | 'notes'; current: number }) {
+  return <span className="swatches">{[...(kind === 'notes' ? [0] : []), 1, 2, 3, 4, 5, 6].map((i) =>
+    <button key={i} title={i ? COLORS[i - 1][3] : 'Yellow'} className={`swatch${current === i ? ' on' : ''}`} style={{ background: i ? COLORS[i - 1][1] : NOTE_FILL, borderColor: i ? COLORS[i - 1][2] : '#c9b766' }}
+      onClick={() => writeMap(edit(S().map, kind, id, { color: i || undefined }), 'Change a colour')} />)}</span>
+}
+
+const AreaNode = memo(({ id, data, selected }: NodeProps<Node<Area>>) => {
+  const editing = useUi((s) => s.editing === id)
   const c = COLORS[(data.color - 1) % 6]
   return <>
-    <NodeResizer isVisible={data.on} minWidth={240} minHeight={140} color={c[2]} onResizeEnd={(_, p) => writeMap(edit(S().map, 'frames', id, { x: p.x, y: p.y, w: p.width, h: p.height }), `Resize ${data.label}`)} />
-    <div className={`frame${data.on ? ' on' : ''}`} style={{ background: c[1], borderColor: c[2] }}>
-      <div className="frame-label" title="Drag to move the frame and its cards; double-click to rename">{data.label || 'Frame'}</div>
+    <NodeResizer isVisible={selected && !editing} minWidth={200} minHeight={120} color={c[2]}
+      onResizeEnd={(_, p) => writeMap(edit(S().map, 'frames', id, { x: p.x, y: p.y, w: p.width, h: p.height }), `Resize ${data.label || 'an area'}`)} />
+    <NodeToolbar isVisible={selected && !editing} className="node-tools" style={{ zIndex: 1000 }}>
+      <Swatches id={id} kind="frames" current={data.color} />
+      <button onClick={() => useUi.setState({ editing: id })}>Rename</button><button onClick={() => fitArea(id)}>Fit to its cards</button>
+      <button className="danger" onClick={() => removeItems([id])}>Delete</button>
+    </NodeToolbar>
+    <div className={`frame${selected ? ' on' : ''}`} style={{ background: c[1], borderColor: c[2] }}>
+      {editing ? <Inline value={data.label} className="frame-input" onDone={(v) => commit(id, 'frames', 'label', v.trim())} />
+        : <div className="frame-label" title="Double-click to rename" onDoubleClick={(e) => { e.stopPropagation(); useUi.setState({ editing: id }) }}>{data.label || 'Area'}</div>}
     </div>
   </>
 })
 
-const NoteNode = memo(({ data, selected }: NodeProps<Node<{ text: string }>>) => <div className={`note${selected ? ' sel' : ''}`}>{data.text}</div>)
-const nodeTypes = { quest: QuestCard, frame: FrameNode, note: NoteNode }
+const NoteNode = memo(({ id, data, selected }: NodeProps<Node<Note>>) => {
+  const editing = useUi((s) => s.editing === id)
+  return <>
+    <NodeResizer isVisible={selected && !editing} minWidth={140} minHeight={60} color="#b3a46a"
+      onResizeEnd={(_, p) => writeMap(edit(S().map, 'notes', id, { x: p.x, y: p.y, w: p.width, h: p.height }), 'Resize a note')} />
+    <NodeToolbar isVisible={selected && !editing} className="node-tools" style={{ zIndex: 1000 }}>
+      <Swatches id={id} kind="notes" current={data.color} />
+      <button onClick={() => useUi.setState({ editing: id })}>Edit</button><button className="danger" onClick={() => removeItems([id])}>Delete</button>
+    </NodeToolbar>
+    <div className={`note${selected ? ' sel' : ''}`} style={{ background: data.color ? COLORS[(data.color - 1) % 6][1] : NOTE_FILL }} onDoubleClick={(e) => { e.stopPropagation(); useUi.setState({ editing: id }) }}>
+      {editing ? <Inline value={data.text} multi className="note-input" onDone={(v) => commit(id, 'notes', 'text', v)} /> : data.text || <i className="muted">Empty note</i>}
+    </div>
+  </>
+})
+const nodeTypes = { quest: QuestCard, frame: AreaNode, note: NoteNode }
 
 const done = (text: string) => { const c = lastChange(); toast(text, { label: 'Undo', run: () => undo(c) }) }
-const newId = (p: string) => `${p}_${Date.now().toString(36)}`
+let seq = 0
+const newId = (p: string) => `${p}_${Date.now().toString(36)}${(seq++ % 36).toString(36)}`
 const quests = (ns: Node[]) => ns.filter((n) => n.type === 'quest').map((n) => n.id)
+const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`
+type Rect = { x: number; y: number; w: number; h: number }
 
-function renameFrame(id: string) {
-  const f = S().map.frames?.find((x) => x.id === id)
-  if (f) ask({ title: 'Rename frame', value: f.label, ok: 'Rename', run: (v) => writeMap(edit(S().map, 'frames', id, { label: v }), `Rename ${f.label || 'a frame'}`) })
+/** Keeps an in-place edit. An empty new note is dropped rather than kept. */
+function commit(id: string, kind: 'frames' | 'notes', key: 'label' | 'text', v: string) {
+  const item = (S().map[kind] as (MapFrame | MapNote)[] | undefined)?.find((x) => x.id === id) as Record<string, unknown> | undefined
+  if (!item) return
+  if (kind === 'notes' && !v.trim()) return removeItems([id])
+  if (v !== item[key]) writeMap(edit(S().map, kind, id, { [key]: v }), kind === 'frames' ? `Rename ${item.label || 'an area'}` : 'Edit a note')
 }
-function editNote(id: string) {
-  const n = S().map.notes?.find((x) => x.id === id)
-  if (n) ask({ title: 'Note', value: n.text, ok: 'Save', run: (v) => writeMap(edit(S().map, 'notes', id, { text: v }), 'Edit a note') })
+function removeItems(ids: string[]) {
+  let m = S().map
+  for (const id of ids) m = edit(m, m.frames?.some((f) => f.id === id) ? 'frames' : 'notes', id, null)
+  writeMap(m, ids.length > 1 ? `Delete ${ids.length} items` : ids[0].startsWith('f_') ? 'Delete an area' : 'Delete a note')
+  useUi.setState({ picked: [] })
+}
+/** A new area, selected and ready to be named. */
+function addArea(r: Rect) {
+  const id = newId('f'), color = ((S().map.frames?.length ?? 0) % 6) + 1
+  writeMap(edit(S().map, 'frames', id, { label: '', ...r, color }), 'Add an area')
+  useUi.setState({ picked: [id], editing: id })
+  useStore.setState({ selected: null, multi: [] })
 }
 function addNote(at: { x: number; y: number }) {
-  ask({ title: 'New note', value: '', ok: 'Add', placeholder: 'Text on the canvas; takes no links', run: (v) => writeMap(edit(S().map, 'notes', newId('n'), { text: v, x: at.x, y: at.y }), 'Add a note') })
+  const id = newId('n')
+  writeMap(edit(S().map, 'notes', id, { text: '', x: at.x, y: at.y }), 'Add a note')
+  useUi.setState({ picked: [id], editing: id })
 }
-/** A frame around cards (or an empty one at a point), named by the designer. */
-function addFrame(ids: string[], at?: { x: number; y: number }) {
-  const ns = (S().map.nodes ?? []).filter((n) => ids.includes(n.id))
-  if (!ns.length && !at) return toast('Select the cards to frame first.')
-  const [x0, y0] = ns.length ? [Math.min(...ns.map((n) => n.x)), Math.min(...ns.map((n) => n.y))] : [at!.x, at!.y]
-  const [x1, y1] = ns.length ? [Math.max(...ns.map((n) => n.x)) + CARD_W, Math.max(...ns.map((n) => n.y)) + CARD_H] : [x0 + 600, y0 + 400]
-  const color = ((S().map.frames?.length ?? 0) % 6) + 1
-  ask({ title: 'New frame', value: '', ok: 'Add', placeholder: 'Name', run: (v) =>
-    writeMap(edit(S().map, 'frames', newId('f'), { label: v, x: x0 - 32, y: y0 - 64, w: x1 - x0 + 64, h: y1 - y0 + 96, color }), `Add the frame ${v}`) })
+const box = (m: MapData, ids: string[]) => {
+  const rs = [...(m.nodes ?? []).filter((n) => ids.includes(n.id)).map((n) => ({ x: n.x, y: n.y, w: CARD_W, h: CARD_H })),
+    ...(m.notes ?? []).filter((n) => ids.includes(n.id)).map((n) => ({ x: n.x, y: n.y, w: n.w ?? NOTE_W, h: n.h ?? NOTE_H }))]
+  if (!rs.length) return null
+  const [x0, y0] = [Math.min(...rs.map((r) => r.x)), Math.min(...rs.map((r) => r.y))]
+  return { x: x0, y: y0, w: Math.max(...rs.map((r) => r.x + r.w)) - x0, h: Math.max(...rs.map((r) => r.y + r.h)) - y0 }
 }
+/** An area around cards and notes, with room for its name. */
+function areaAround(ids: string[]) {
+  const b = box(S().map, ids)
+  if (!b) return toast('Select the cards to put in an area first.')
+  addArea({ x: b.x - 32, y: b.y - 64, w: b.w + 64, h: b.h + 96 })
+}
+/** Cards and notes whose middle is inside an area, and smaller areas wholly inside it. */
+function inside(m: MapData, f: Rect) {
+  const mid = (x: number, y: number, w: number, h: number) => x + w / 2 > f.x && x + w / 2 < f.x + f.w && y + h / 2 > f.y && y + h / 2 < f.y + f.h
+  return [
+    ...(m.nodes ?? []).filter((n) => mid(n.x, n.y, CARD_W, CARD_H)).map((n) => n.id),
+    ...(m.notes ?? []).filter((n) => mid(n.x, n.y, n.w ?? NOTE_W, n.h ?? NOTE_H)).map((n) => n.id),
+    ...(m.frames ?? []).filter((g) => g.w * g.h < f.w * f.h && g.x >= f.x && g.y >= f.y && g.x + g.w <= f.x + f.w && g.y + g.h <= f.y + f.h).map((g) => g.id),
+  ]
+}
+const areaOf = (id: string) => S().map.frames?.find((f) => f.id === id)
+/** The smallest area under a point. An area's empty inside belongs to the canvas, so a drag there still draws a selection
+ *  box; a click there picks the area, and a picked area can be dragged anywhere and resized. */
+const areaAt = (p: { x: number; y: number }) => (S().map.frames ?? []).filter((f) => p.x > f.x && p.x < f.x + f.w && p.y > f.y && p.y < f.y + f.h)
+  .sort((a, b) => a.w * a.h - b.w * b.h)[0]?.id
+function fitArea(id: string) {
+  const f = areaOf(id), b = f && box(S().map, inside(S().map, f))
+  if (!f || !b) return toast('This area has no cards in it.')
+  writeMap(edit(S().map, 'frames', id, { x: b.x - 32, y: b.y - 64, w: b.w + 64, h: b.h + 96 }), `Fit ${f.label || 'an area'} to its cards`)
+}
+
 const linkPairs = () => links(S().schema, S().pages).map((l): [string, string] => [l.from, l.to])
 /** ELK layout of a selection, put where the selection was. */
 async function tidy(ids: string[]) {
   const ns = (S().map.nodes ?? []).filter((n) => ids.includes(n.id))
   if (ns.length < 2) return toast('Select two or more cards to tidy.')
   const at = clear(await layered(ns.map((n) => n.id), linkPairs(), new Map(ns.map((n) => [n.id, n])), { x: Math.min(...ns.map((n) => n.x)), y: Math.min(...ns.map((n) => n.y)) }))
-  placeCards(at, `Tidy ${quests_(ns.length)}`)
-  done(`Tidied ${quests_(ns.length)}`)
+  placeCards(at, `Tidy ${plural(ns.length, 'quest')}`)
+  done(`Tidied ${plural(ns.length, 'quest')}`)
 }
 /** Moves a laid-out group down until it overlaps no card outside it. */
 function clear(at: Record<string, { x: number; y: number }>) {
@@ -108,7 +200,6 @@ function clear(at: Record<string, { x: number; y: number }>) {
   }
   return at
 }
-const quests_ = (n: number) => `${n} quest${n === 1 ? '' : 's'}`
 /** Lays out every quest still in Hooks, to the right of everything on the map. */
 export async function placeAll() {
   const s = S(), on = new Set((s.map.nodes ?? []).map((n) => n.id))
@@ -116,8 +207,8 @@ export async function placeAll() {
   if (!ids.length) return toast('Every quest is on the map.')
   const all = [...(s.map.nodes ?? []), ...(s.map.frames ?? []).map((f) => ({ ...f, x: f.x + f.w - CARD_W }))]
   const origin = all.length ? { x: Math.max(...all.map((n) => n.x)) + CARD_W + 160, y: Math.min(...all.map((n) => n.y)) } : { x: 0, y: 0 }
-  placeCards(clear(await layered(ids, linkPairs(), new Map(), origin)), `Place ${quests_(ids.length)} from Hooks`)
-  done(`Placed ${quests_(ids.length)} from Hooks`)
+  placeCards(clear(await layered(ids, linkPairs(), new Map(), origin)), `Place ${plural(ids.length, 'quest')} from Hooks`)
+  done(`Placed ${plural(ids.length, 'quest')} from Hooks`)
   window.dispatchEvent(new Event('qn:fit'))
 }
 export async function exportCanvas() {
@@ -133,42 +224,63 @@ export async function importCanvas() {
     const got = fromCanvas(text, Object.fromEntries(Object.values(S().pages).map((p) => [p.file, p.data.id]))), m = S().map
     const keep = <T extends { id: string }>(a: T[] = [], b: T[] = []) => [...a.filter((x) => !b.some((y) => y.id === x.id)), ...b]
     writeMap({ nodes: keep(m.nodes, got.nodes), frames: keep(m.frames, got.frames), notes: keep(m.notes, got.notes) }, 'Import a layout')
-    done(`Placed ${got.nodes?.length ?? 0} quests from the canvas file`)
+    done(`Placed ${plural(got.nodes?.length ?? 0, 'quest')} from the canvas file`)
   } catch (e) { toast(`Could not read that canvas file: ${e}`) }
 }
+
+// Copy, paste and duplicate: cards become new quests (links among them follow), areas and notes new items, all one undo step.
+let clip: { quests: string[]; frames: MapFrame[]; notes: MapNote[] } | null = null
+const chosen = () => { const m = S().map, p = U().picked; return { quests: targets().filter((id) => m.nodes?.some((n) => n.id === id)), frames: (m.frames ?? []).filter((f) => p.includes(f.id)), notes: (m.notes ?? []).filter((n) => p.includes(n.id)) } }
+async function paste(c: NonNullable<typeof clip>, to?: { x: number; y: number }, verb = 'Paste') {
+  const n = c.quests.length + c.frames.length + c.notes.length
+  if (!n) return
+  const pts = [...(S().map.nodes ?? []).filter((q) => c.quests.includes(q.id)), ...c.frames, ...c.notes]
+  const [dx, dy] = to && pts.length ? [Math.round(to.x - Math.min(...pts.map((p) => p.x))), Math.round(to.y - Math.min(...pts.map((p) => p.y)))] : [40, 40]
+  await batch(`${verb} ${plural(n, 'item')}`, async () => {
+    const made = await duplicateAll(c.quests, dx, dy)
+    let next = S().map
+    const picked: string[] = []
+    for (const f of c.frames) { const id = newId('f'); picked.push(id); next = edit(next, 'frames', id, { ...f, id, x: f.x + dx, y: f.y + dy }) }
+    for (const t of c.notes) { const id = newId('n'); picked.push(id); next = edit(next, 'notes', id, { ...t, id, x: t.x + dx, y: t.y + dy }) }
+    if (picked.length) writeMap(next)
+    const qs = [...made.values()]
+    useStore.setState({ selected: qs[qs.length - 1] ?? null, multi: qs.length > 1 ? qs : [] })
+    useUi.setState({ picked })
+  })
+  done(`${verb === 'Paste' ? 'Pasted' : 'Duplicated'} ${plural(n, 'item')}`)
+}
+const duplicateSel = () => paste(chosen(), undefined, 'Duplicate')
 
 /** The menu for a card: with several picked, what can be done to all of them. */
 function cardMenu(id: string): MenuItem[] {
   const many = S().multi.length > 1 && S().multi.includes(id) ? targets() : null
-  if (!many) return [...pageMenu(id).slice(0, -2), { label: 'Frame around it…', key: 'Ctrl G', run: () => addFrame([id]) },
+  if (!many) return [...pageMenu(id).slice(0, -2), { label: 'Put in a new area', key: 'Ctrl G', run: () => areaAround([id]) },
     { label: 'Move to Hooks', run: () => unplace([id]) }, ...pageMenu(id).slice(-2)]
   const al = (how: Align, text: string): MenuItem => ({ label: text, run: () => placeCards(align(S().map, many, how), `${text} ${many.length} quests`) })
   return [
     ...STATUSES.map((st, i): MenuItem => ({ label: `Set ${many.length} to ${STATUS_LABEL[st]}`, key: i < 5 ? String(i + 1) : undefined, run: () => setStatus(many, st, STATUS_LABEL[st]) })),
     '-', al('left', 'Align left'), al('center', 'Align centres'), al('right', 'Align right'), al('top', 'Align tops'), al('middle', 'Align middles'), al('bottom', 'Align bottoms'),
     al('across', 'Space evenly across'), al('down', 'Space evenly down'),
-    '-', { label: `Tidy ${many.length} quests`, run: () => tidy(many) }, { label: 'Frame around them…', key: 'Ctrl G', run: () => addFrame(many) },
+    '-', { label: `Tidy ${many.length} quests`, run: () => tidy(many) }, { label: 'Put them in a new area', key: 'Ctrl G', run: () => areaAround(many) },
+    { label: 'Duplicate', key: 'Ctrl D', run: duplicateSel },
     '-', { label: `Move ${many.length} to Hooks`, run: () => unplace(many) },
     { label: `Move ${many.length} to Trash`, key: 'Del', danger: true, run: () => trashPages(many) },
   ]
 }
-function frameMenu(id: string, inside: string[]): MenuItem[] {
-  const f = S().map.frames?.find((x) => x.id === id)
+function areaMenu(id: string): MenuItem[] {
+  const f = areaOf(id)
   if (!f) return []
+  const cards = inside(S().map, f).filter((x) => S().pages[x])
   return [
-    { label: 'Rename…', run: () => renameFrame(id) },
-    ...COLORS.map((c, i): MenuItem => ({ label: c[3], on: (f.color ?? 1) === i + 1, run: () => writeMap(edit(S().map, 'frames', id, { color: i + 1 }), `Colour ${f.label}`) })),
-    '-', { label: `Select its ${inside.length} cards`, run: () => useStore.setState({ multi: inside.length > 1 ? inside : [], selected: inside[0] ?? null }) },
-    { label: 'Tidy its cards', run: () => tidy(inside) },
-    '-', { label: 'Delete the frame (cards stay)', danger: true, run: () => writeMap(edit(S().map, 'frames', id, null), `Delete the frame ${f.label}`) },
+    { label: 'Rename', run: () => useUi.setState({ editing: id }) },
+    ...COLORS.map((c, i): MenuItem => ({ label: c[3], on: (f.color ?? 1) === i + 1, run: () => writeMap(edit(S().map, 'frames', id, { color: i + 1 }), `Colour ${f.label || 'an area'}`) })),
+    '-', { label: `Select its ${plural(cards.length, 'card')}`, run: () => { useStore.setState({ multi: cards.length > 1 ? cards : [], selected: cards[0] ?? null }); useUi.setState({ picked: [] }) } },
+    { label: 'Tidy its cards', run: () => tidy(cards) }, { label: 'Fit to its cards', run: () => fitArea(id) },
+    '-', { label: 'Delete the area (cards stay)', key: 'Del', danger: true, run: () => removeItems([id]) },
   ]
 }
 
-/** The ids of cards and notes whose middle lies inside a frame. */
-const insideOf = (f: { x: number; y: number; w: number; h: number }, ns: Node[]) =>
-  ns.filter((n) => n.type !== 'frame').filter((n) => { const cx = n.position.x + (n.type === 'note' ? NOTE_W : CARD_W) / 2, cy = n.position.y + (n.type === 'note' ? NOTE_H : CARD_H) / 2; return cx > f.x && cx < f.x + f.w && cy > f.y && cy < f.y + f.h }).map((n) => n.id)
 const size = (n: Node) => ({ w: n.width ?? n.measured?.width ?? CARD_W, h: n.height ?? n.measured?.height ?? CARD_H })
-
 /** Snaps a dragged item to the nearest edge or centre of another within a few pixels, and says where the guide lines are. */
 function guideSnap(me: Node, pos: { x: number; y: number }, all: Node[], zoom: number) {
   const { w, h } = size(me), T = 6 / zoom
@@ -188,20 +300,22 @@ function guideSnap(me: Node, pos: { x: number; y: number }, all: Node[], zoom: n
 
 export function MapView() {
   const { pages, map, engine, selected, multi, filters, text, payoffs, schema, project } = useStore()
+  const { picked, tool } = useUi()
   const flow = useReactFlow()
-  const [extra, setExtra] = useState<string[]>([])
   const [edgeSel, setEdgeSel] = useState<string | null>(null)
   const [hover, setHover] = useState<string | null>(null)
   const [guides, setGuides] = useState<{ x?: number; y?: number } | null>(null)
   const [menu, setMenu] = useState<{ source: string; target: string; x: number; y: number } | null>(null)
   const [snap, setSnap] = useState(() => { try { return localStorage.getItem('qn.snap') !== 'off' } catch { return true } })
-  const [alt, setAlt] = useState(false)
+  const [keys, setKeys] = useState({ alt: false, shift: false })
+  const pointer = useRef<{ x: number; y: number } | null>(null)
   const cut = filters.includes('status:cut')
   const matches = useCallback((q: Data) => matchQuest(schema, pages, q, filters, text, engine), [schema, pages, filters, text, engine])
   const all = useMemo(() => links(schema, pages), [schema, pages])
   const at = useMemo(() => new Map((map.nodes ?? []).filter((n) => pages[n.id]?.data.type === 'quest' && (cut || pages[n.id].data.status !== 'cut')).map((n) => [n.id, n])), [map, pages, cut])
 
-  /** Cards, frames and notes as React Flow nodes. A node object is reused while nothing about it changed, so React Flow redraws only what did. */
+  /** Areas (largest first, so smaller ones sit on top), cards and notes as React Flow nodes. A node object is reused while
+   *  nothing about it changed, so React Flow redraws only what did. */
   const cache = useRef(new Map<string, Node>())
   const laid = useMemo(() => {
     const sel = new Set(multi.length ? multi : selected ? [selected] : [])
@@ -222,16 +336,16 @@ export function MapView() {
       }
     }
     const nodes: Node[] = [
-      ...(map.frames ?? []).map((f): Node => ({ id: f.id, type: 'frame', position: { x: f.x, y: f.y }, width: f.w, height: f.h, zIndex: -1, selectable: false, connectable: false,
-        dragHandle: '.frame-label', style: { pointerEvents: 'none' }, data: { label: f.label, color: f.color ?? 1, on: extra.includes(f.id) } })),
+      ...[...(map.frames ?? [])].sort((a, b) => b.w * b.h - a.w * a.h).map((f): Node => ({ id: f.id, type: 'frame', position: { x: f.x, y: f.y }, width: f.w, height: f.h, zIndex: -1,
+        connectable: false, selected: picked.includes(f.id), data: { label: f.label, color: f.color ?? 1 } })),
       ...[...at.values()].map((n): Node => ({ id: n.id, type: 'quest', position: { x: n.x, y: n.y }, width: CARD_W, height: CARD_H, selected: sel.has(n.id), data: card(pages[n.id].data) })),
-      ...(map.notes ?? []).map((n): Node => ({ id: n.id, type: 'note', position: { x: n.x, y: n.y }, width: NOTE_W, height: NOTE_H, connectable: false, selected: extra.includes(n.id), data: { text: n.text } })),
+      ...(map.notes ?? []).map((n): Node => ({ id: n.id, type: 'note', position: { x: n.x, y: n.y }, width: n.w ?? NOTE_W, height: n.h ?? NOTE_H, connectable: false, selected: picked.includes(n.id), data: { text: n.text, color: n.color ?? 0 } })),
     ]
     const same = (a: Node, b: Node) => a.position.x === b.position.x && a.position.y === b.position.y && a.selected === b.selected && a.width === b.width && a.height === b.height && JSON.stringify(a.data) === JSON.stringify(b.data)
     const next = nodes.map((n) => { const old = cache.current.get(n.id); return old && same(old, n) ? old : n })
     cache.current = new Map(next.map((n) => [n.id, n]))
     return next
-  }, [map, at, pages, schema, engine, all, matches, selected, multi, extra])
+  }, [map, at, pages, schema, engine, all, matches, selected, multi, picked])
   const [nodes, setNodes] = useState(laid)
   const live = useRef(nodes)
   useEffect(() => { live.current = laid; setNodes(laid) }, [laid])
@@ -245,18 +359,18 @@ export function MapView() {
     }
   }), [all, at, hover, selected, edgeSel, payoffs])
 
-  // Dragging: magnetic guides while one item moves; a frame carries what sits inside it; everything moved is one undo step.
-  const carry = useRef<{ frame: string; from: { x: number; y: number }; start: Map<string, { x: number; y: number }> } | null>(null)
+  // Dragging: magnetic guides while one item moves; an area carries what sits inside it; everything moved is one undo step.
+  const carry = useRef<{ anchor: string; from: { x: number; y: number }; start: Map<string, { x: number; y: number }> } | null>(null)
   const onNodesChange = useCallback((changes: NodeChange<Node>[]) => {
     const moving = changes.filter((c): c is NodePositionChange => c.type === 'position' && !!c.dragging && !!c.position)
-    if (moving.length === 1 && !alt) {
+    if (moving.length === 1 && !keys.alt) {
       const me = live.current.find((n) => n.id === moving[0].id)
       if (me) { const g = guideSnap(me, moving[0].position!, live.current, flow.getZoom()); moving[0].position = g.pos; setGuides(g.guides.x !== undefined || g.guides.y !== undefined ? g.guides : null) }
     }
     let next = applyNodeChanges(changes, live.current)
-    const c = carry.current, frame = c && moving.find((m) => m.id === c.frame)
-    if (c && frame) {
-      const dx = frame.position!.x - c.from.x, dy = frame.position!.y - c.from.y
+    const c = carry.current, a = c && moving.find((m) => m.id === c.anchor)
+    if (c && a) {
+      const dx = a.position!.x - c.from.x, dy = a.position!.y - c.from.y
       next = next.map((n) => (c.start.has(n.id) ? { ...n, position: { x: c.start.get(n.id)!.x + dx, y: c.start.get(n.id)!.y + dy } } : n))
     }
     live.current = next
@@ -264,24 +378,28 @@ export function MapView() {
     if (changes.some((x) => x.type === 'select')) {
       const sel = next.filter((n) => n.selected), qs = quests(sel)
       useStore.setState({ selected: qs[qs.length - 1] ?? null, multi: qs.length > 1 ? qs : [] })
-      setExtra(sel.filter((n) => n.type === 'note').map((n) => n.id))
+      // Areas and notes picked by a click on the canvas (see onPaneClick) are kept unless React Flow itself unselects them.
+      const off = new Set(changes.flatMap((x) => (x.type === 'select' && !x.selected ? [x.id] : [])))
+      useUi.setState({ picked: [...new Set([...U().picked.filter((id) => !off.has(id)), ...sel.filter((n) => n.type !== 'quest').map((n) => n.id)])] })
     }
-  }, [alt, flow])
+  }, [keys.alt, flow])
   const tray = useRef<HTMLDivElement>(null)
   const overTray = (e: MouseEvent | TouchEvent) => { const r = tray.current?.getBoundingClientRect(), y = 'clientY' in e ? e.clientY : e.changedTouches[0].clientY; return !!r && y >= r.top }
-  const dragStart = (_: unknown, node: Node) => {
-    if (node.type !== 'frame') return
-    const f = { x: node.position.x, y: node.position.y, ...size(node) }
-    carry.current = { frame: node.id, from: node.position, start: new Map(insideOf({ x: f.x, y: f.y, w: f.w, h: f.h }, live.current).map((id) => [id, live.current.find((n) => n.id === id)!.position])) }
+  const dragStart = (_: unknown, node: Node, dragged: Node[]) => {
+    const areas = dragged.filter((n) => n.type === 'frame').map((n) => areaOf(n.id)).filter(Boolean) as MapFrame[]
+    if (!areas.length) return
+    const moving = new Set(dragged.map((n) => n.id)), m = S().map
+    const start = new Map(areas.flatMap((f) => inside(m, f)).filter((id) => !moving.has(id)).flatMap((id) => { const n = live.current.find((x) => x.id === id); return n ? [[id, n.position] as const] : [] }))
+    carry.current = { anchor: node.id, from: node.position, start }
   }
   const dragStop = (e: MouseEvent | TouchEvent, _: Node, dragged: Node[]) => {
     setGuides(null)
-    const moved = [...dragged, ...live.current.filter((n) => carry.current?.start.has(n.id))]
+    const ids = new Set(dragged.map((n) => n.id)), moved = live.current.filter((n) => ids.has(n.id) || carry.current?.start.has(n.id))
     carry.current = null
-    if (overTray(e) && quests(dragged).length) { unplace(quests(dragged)); return done(`Moved ${quests(dragged).length > 1 ? `${quests(dragged).length} quests` : label(pages, dragged[0].id)} to Hooks`) }
+    if (overTray(e) && quests(dragged).length) { unplace(quests(dragged)); return done(`Moved ${quests(dragged).length > 1 ? plural(quests(dragged).length, 'quest') : label(pages, dragged[0].id)} to Hooks`) }
     const cards = Object.fromEntries(moved.filter((n) => n.type === 'quest').map((n) => [n.id, n.position]))
     const items = Object.fromEntries(moved.filter((n) => n.type !== 'quest').map((n) => [n.id, n.position]))
-    const name = moved.length === 1 ? (moved[0].type === 'quest' ? label(pages, moved[0].id) : moved[0].type === 'frame' ? `the frame ${(moved[0].data as Frame).label}` : 'a note') : `${moved.length} items`
+    const name = moved.length === 1 ? (moved[0].type === 'quest' ? label(pages, moved[0].id) : moved[0].type === 'frame' ? (moved[0].data as Area).label || 'an area' : 'a note') : plural(moved.length, 'item')
     writeMap(moveItems(place(S().map, cards), items), `Move ${name}`)
   }
 
@@ -319,7 +437,8 @@ export function MapView() {
     else update(c.source, (p) => ({ ...p, body: addPayoff(p.body, kind, c.target) }), `Add the payoff ${name}`)
     setMenu(null)
   }
-  const pointAt = (x: number, y: number) => { const p = flow.screenToFlowPosition({ x, y }); return { x: p.x - CARD_W / 2, y: p.y - CARD_H / 2 } }
+  const flowAt = (x: number, y: number) => flow.screenToFlowPosition({ x, y })
+  const pointAt = (x: number, y: number) => { const p = flowAt(x, y); return { x: p.x - CARD_W / 2, y: p.y - CARD_H / 2 } }
   const onConnectEnd = async (e: MouseEvent | TouchEvent, s: FinalConnectionState) => {
     if (s.isValid || !s.fromNode) return
     const pt = 'clientX' in e ? e : e.changedTouches[0], from = s.fromNode.id
@@ -331,46 +450,55 @@ export function MapView() {
     peek(id)
   }
   const createAt = async (x: number, y: number) => peek(await createQuest({ status: 'idea' }, pointAt(x, y)))
-  const remove = (ids: string[]) => {
-    let m = S().map
-    for (const id of ids) m = edit(m, m.frames?.some((f) => f.id === id) ? 'frames' : 'notes', id, null)
-    writeMap(m, ids.length > 1 ? `Delete ${ids.length} items` : ids[0].startsWith('f_') ? 'Delete a frame' : 'Delete a note')
-    setExtra([])
-  }
 
   useEffect(() => {
-    const onFit = (e: Event) => fit((e as CustomEvent).detail === 'selection' ? [...targets(), ...extra] : undefined)
+    const onFit = (e: Event) => fit((e as CustomEvent).detail === 'selection' ? [...targets(), ...U().picked] : undefined)
     const onFocus = (e: Event) => {
       const { id, keep } = (e as CustomEvent).detail as { id: string; keep?: boolean }, n = at.get(id)
       if (n) flow.setCenter(n.x + CARD_W / 2, n.y + CARD_H / 2, { zoom: keep ? flow.getZoom() : Math.max(flow.getZoom(), 1), duration: 300 })
     }
     const key = (e: KeyboardEvent) => {
-      if (e.key === 'Alt') setAlt(e.type === 'keydown')
-      const s = S()
-      if (e.type !== 'keydown' || s.dialog || s.palette || (e.target as HTMLElement).closest('input, textarea, select, [contenteditable="true"]')) return
-      if (e.key === 'Delete' || e.key === 'Backspace') {
-        if (extra.length) { e.preventDefault(); remove(extra) }
+      if (e.key === 'Alt' || e.key === 'Shift') setKeys({ alt: e.altKey, shift: e.shiftKey })
+      const s = S(), ui = U(), mod = e.ctrlKey || e.metaKey, k = e.key.toLowerCase()
+      if (e.type !== 'keydown' || s.dialog || s.palette || s.menu || (e.target as HTMLElement).closest('input, textarea, select, [contenteditable="true"], .peek')) return
+      if (e.key === 'Escape') { useUi.setState({ picked: [], tool: null }); setEdgeSel(null); return }
+      if ((e.key === 'Delete' || e.key === 'Backspace') && !mod) {
+        if (ui.picked.length) { e.preventDefault(); removeItems(ui.picked) }
         const edge = edges.find((x) => x.id === edgeSel)
         if (edge) { e.preventDefault(); unlink(edge) }
+        return
       }
-      if (e.key === 'Escape') { setExtra([]); setEdgeSel(null) }
+      if (mod && k === 'a') { e.preventDefault(); const qs = [...at.keys()]; useStore.setState({ multi: qs.length > 1 ? qs : [], selected: qs[0] ?? null }); useUi.setState({ picked: (s.map.notes ?? []).map((n) => n.id) }); return }
+      if (mod && k === 'c') { const c = chosen(); if (c.quests.length + c.frames.length + c.notes.length) { clip = c; toast(`Copied ${plural(c.quests.length + c.frames.length + c.notes.length, 'item')}`, undefined, 'clip') } return }
+      if (mod && k === 'v' && clip) { e.preventDefault(); paste(clip, pointer.current ? flowAt(pointer.current.x, pointer.current.y) : undefined); return }
+      if (e.key.startsWith('Arrow') && !mod && !e.altKey) {
+        const [dx, dy] = ({ ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] } as Record<string, number[]>)[e.key]
+        if (ui.picked.length) { // areas and notes nudge here; cards are nudged by the app's own keys
+          const items = Object.fromEntries([...(s.map.frames ?? []), ...(s.map.notes ?? [])].filter((i) => ui.picked.includes(i.id)).map((i) => [i.id, { x: i.x + dx * (e.shiftKey ? 20 : 5), y: i.y + dy * (e.shiftKey ? 20 : 5) }]))
+          writeMap(moveItems(s.map, items), 'Nudge', 'nudge')
+        } else if (!targets().length) { const v = flow.getViewport(); flow.setViewport({ ...v, x: v.x - dx * (e.shiftKey ? 240 : 80), y: v.y - dy * (e.shiftKey ? 240 : 80) }, { duration: 120 }) }
+      }
     }
-    const frame = () => addFrame(targets())
+    const frame = () => areaAround([...targets(), ...U().picked.filter((id) => id.startsWith('n_'))])
     const tidyNow = () => tidy(targets())
-    const ups = [['qn:fit', onFit], ['qn:focus', onFocus], ['qn:frame', frame], ['qn:tidy', tidyNow], ['keydown', key], ['keyup', key]] as const
+    const pickTool = (e: Event) => useUi.setState({ tool: (e as CustomEvent).detail })
+    const ups = [['qn:fit', onFit], ['qn:focus', onFocus], ['qn:frame', frame], ['qn:tidy', tidyNow], ['qn:duplicate', duplicateSel], ['qn:tool', pickTool], ['keydown', key], ['keyup', key]] as const
     for (const [n, f] of ups) window.addEventListener(n, f as EventListener)
     return () => { for (const [n, f] of ups) window.removeEventListener(n, f as EventListener) }
-  }, [flow, at, fit, extra, edges, edgeSel, unlink])
+  }, [flow, at, fit, edges, edgeSel, unlink])
 
   const linkMenu = (e: Edge<QuestLink>): MenuItem[] => [
     { label: `Open ${label(pages, e.source)}`, run: () => peek(e.source) }, { label: `Open ${label(pages, e.target)}`, run: () => peek(e.target) },
     '-', { label: e.data!.kind === 'leads' ? 'Remove this link' : `Remove the payoff “${e.data!.condition}”`, key: 'Del', danger: true, run: () => unlink(e) },
   ]
   const paneMenu = (e: React.MouseEvent | MouseEvent): MenuItem[] => {
-    const p = pointAt(e.clientX, e.clientY)
+    const p = flowAt(e.clientX, e.clientY), area = areaAt(p)
+    if (area) useUi.setState({ picked: [area] })
     return [
       { label: 'New quest here', run: () => createAt(e.clientX, e.clientY) },
-      { label: 'Add a note here…', run: () => addNote(p) }, { label: 'Add a frame here…', run: () => addFrame([], p) },
+      { label: 'Add a note here', key: 'T', run: () => addNote(p) }, ...(area ? [] : [{ label: 'Add an area here', key: 'A', run: () => addArea({ x: p.x, y: p.y, w: 480, h: 320 }) }]),
+      ...(clip ? [{ label: 'Paste here', key: 'Ctrl V', run: () => paste(clip!, p) }] : []),
+      ...(area ? ['-' as const, ...areaMenu(area)] : []),
       '-',
       { label: payoffs ? 'Hide payoff links' : 'Show payoff links', key: 'P', run: () => useStore.setState({ payoffs: !payoffs }) },
       { label: 'Fit everything', key: 'Shift 1', run: () => fit() }, { label: 'Snap to grid', on: snap, run: () => toggleSnap() },
@@ -380,26 +508,27 @@ export function MapView() {
   const toggleSnap = () => { setSnap(!snap); try { localStorage.setItem('qn.snap', snap ? 'off' : 'on') } catch { /* not kept */ } }
   const nodeMenu = (e: React.MouseEvent, n: Node) => {
     if (n.type === 'quest') { if (!S().multi.includes(n.id)) useStore.setState({ selected: n.id, multi: [] }); return openMenu(e, cardMenu(n.id)) }
-    if (n.type === 'frame') { setExtra([n.id]); return openMenu(e, frameMenu(n.id, quests(live.current.filter((x) => insideOf({ ...n.position, ...size(n) }, [x]).length)))) }
-    setExtra([n.id])
-    openMenu(e, [{ label: 'Edit…', run: () => editNote(n.id) }, '-', { label: 'Delete the note', key: 'Del', danger: true, run: () => remove([n.id]) }])
+    useUi.setState({ picked: U().picked.includes(n.id) ? U().picked : [n.id] })
+    if (n.type === 'frame') return openMenu(e, areaMenu(n.id))
+    openMenu(e, [{ label: 'Edit', run: () => useUi.setState({ editing: n.id }) }, { label: 'Duplicate', key: 'Ctrl D', run: duplicateSel },
+      '-', { label: 'Delete the note', key: 'Del', danger: true, run: () => removeItems([n.id]) }])
   }
 
   const placed = at.size, shown = [...at.values()].filter((n) => matches(pages[n.id].data)).length
   return (
-    <div className="map" onDragOver={(e) => e.preventDefault()}
+    <div className={`map${keys.shift ? ' shift' : ''}`} onDragOver={(e) => e.preventDefault()} onMouseMove={(e) => { pointer.current = { x: e.clientX, y: e.clientY } }}
       onDrop={(e) => { const id = e.dataTransfer.getData('qn/quest'); if (id) { placeCards({ [id]: pointAt(e.clientX, e.clientY) }, `Place ${label(pages, id)}`); done(`Placed ${label(pages, id)}`) } }}
       onDoubleClick={(e) => (e.target as HTMLElement).classList.contains('react-flow__pane') && createAt(e.clientX, e.clientY)}>
       <FilterBar shown={shown} total={placed} snap={snap} toggleSnap={toggleSnap} fit={fit} />
-      <ReactFlow<Node, Edge<QuestLink>> nodes={nodes} edges={edges} nodeTypes={nodeTypes} onNodesChange={onNodesChange} minZoom={0.15} maxZoom={2} onInit={restore} onMoveEnd={remember}
-        selectionOnDrag panOnDrag={[1, 2]} panOnScroll selectionMode={SelectionMode.Partial} multiSelectionKeyCode={['Control', 'Meta', 'Shift']}
-        snapToGrid={snap && !alt} snapGrid={[20, 20]} elevateNodesOnSelect={false} onlyRenderVisibleElements={nodes.length > 300}
+      <div className="flow"><ReactFlow<Node, Edge<QuestLink>> nodes={nodes} edges={edges} nodeTypes={nodeTypes} onNodesChange={onNodesChange} minZoom={0.15} maxZoom={2} onInit={restore} onMoveEnd={remember}
+        selectionOnDrag panOnDrag={[1, 2]} panOnScroll selectionMode={SelectionMode.Full} multiSelectionKeyCode={['Control', 'Meta', 'Shift']}
+        snapToGrid={snap && !keys.alt} snapGrid={[20, 20]} elevateNodesOnSelect={false} onlyRenderVisibleElements={nodes.length > 300}
         zoomOnDoubleClick={false} disableKeyboardA11y deleteKeyCode={null} proOptions={{ hideAttribution: true }}
         onNodeDragStart={dragStart} onNodeDragStop={dragStop}
-        onNodeClick={(_, n) => { setEdgeSel(null); if (n.type === 'frame') { useStore.setState({ selected: null, multi: [] }); setExtra([n.id]) } }}
-        onNodeDoubleClick={(_, n) => (n.type === 'quest' ? openFull(n.id) : n.type === 'frame' ? renameFrame(n.id) : editNote(n.id))}
+        onNodeClick={() => setEdgeSel(null)}
+        onNodeDoubleClick={(e, n) => (n.type === 'quest' ? openFull(n.id) : n.type === 'frame' && createAt(e.clientX, e.clientY))}
         onNodeMouseEnter={(_, n) => n.type === 'quest' && setHover(n.id)} onNodeMouseLeave={() => setHover(null)}
-        onPaneClick={() => { setMenu(null); setEdgeSel(null); setExtra([]) }}
+        onPaneClick={(e) => { setMenu(null); setEdgeSel(null); const a = areaAt(flowAt(e.clientX, e.clientY)); useUi.setState({ picked: a ? [a] : [] }) }}
         onNodeContextMenu={nodeMenu}
         onEdgeClick={(_, e) => { useStore.setState({ selected: null, multi: [] }); setEdgeSel(e.id) }}
         onEdgeContextMenu={(ev, e) => { setEdgeSel(e.id); openMenu(ev, linkMenu(e)) }}
@@ -411,14 +540,42 @@ export function MapView() {
           {guides.x !== undefined && <div className="guide v" style={{ transform: `translate(${guides.x}px, -50000px)` }} />}
           {guides.y !== undefined && <div className="guide h" style={{ transform: `translate(-50000px, ${guides.y}px)` }} />}
         </ViewportPortal>}
-        <MiniMap pannable zoomable nodeStrokeWidth={3} nodeColor={(n) => (n.type === 'frame' ? COLORS[((n.data as Frame).color - 1) % 6][1] : n.type === 'note' ? '#f3e3a6' : (n.data as Card).needs ? '#d9a441' : '#c9bfa9')} />
-      </ReactFlow>
-      {!placed && !map.frames?.length && !map.notes?.length && <div className="map-hint">Double-click anywhere to add a quest, or drag one in from Hooks.</div>}
+        {tool && <DrawLayer tool={tool} snap={snap && !keys.alt} />}
+        <Controls position="bottom-left" showInteractive={false} />
+        <MiniMap pannable zoomable nodeStrokeWidth={3} nodeColor={(n) => (n.type === 'frame' ? COLORS[((n.data as Area).color - 1) % 6][1] : n.type === 'note' ? NOTE_FILL : (n.data as Card).needs ? '#d9a441' : '#c9bfa9')} />
+      </ReactFlow></div>
+      {!placed && !map.frames?.length && !map.notes?.length && <div className="map-hint">Double-click anywhere to add a quest, press A to draw an area, or drag a quest in from Hooks.</div>}
       {menu && <div className="menu" style={{ left: menu.x, top: menu.y }}>
         <button onClick={() => connect(menu, 'leads')}>Leads to {label(pages, menu.target)}</button>
         {branches(pages[menu.source].body, schema.branches).filter((b) => b.condition).map((b) => <button key={b.line} onClick={() => connect(menu, b.line)}>Pays off: {b.condition}</button>)}
         <button className="muted" onClick={() => setMenu(null)}>Cancel</button></div>}
       <Tray at={at} cut={cut} matches={matches} refEl={tray} />
+    </div>
+  )
+}
+
+/** The drawing tools: drag out an area (a click makes a standard one), or click where a note goes. Escape puts the tool down. */
+function DrawLayer({ tool, snap }: { tool: 'area' | 'note'; snap: boolean }) {
+  const flow = useReactFlow()
+  const ref = useRef<HTMLDivElement>(null)
+  const [drag, setDrag] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null)
+  const g = (v: number) => (snap ? Math.round(v / 20) * 20 : Math.round(v))
+  const finish = (e: React.MouseEvent) => {
+    const start = drag ?? { x0: e.clientX, y0: e.clientY }
+    setDrag(null)
+    useUi.setState({ tool: null })
+    const [a, b] = [flow.screenToFlowPosition({ x: start.x0, y: start.y0 }), flow.screenToFlowPosition({ x: e.clientX, y: e.clientY })]
+    if (tool === 'note') return addNote({ x: g(b.x), y: g(b.y) })
+    const tiny = Math.abs(e.clientX - start.x0) < 24 && Math.abs(e.clientY - start.y0) < 24
+    addArea(tiny ? { x: g(b.x), y: g(b.y), w: 480, h: 320 } : { x: g(Math.min(a.x, b.x)), y: g(Math.min(a.y, b.y)), w: g(Math.abs(b.x - a.x)), h: g(Math.abs(b.y - a.y)) })
+  }
+  const r = ref.current?.getBoundingClientRect()
+  return (
+    <div className="draw-layer" ref={ref} title={tool === 'area' ? 'Drag to draw an area; Esc to stop' : 'Click where the note goes; Esc to stop'}
+      onMouseDown={(e) => e.button === 0 && setDrag({ x0: e.clientX, y0: e.clientY, x1: e.clientX, y1: e.clientY })}
+      onMouseMove={(e) => drag && setDrag({ ...drag, x1: e.clientX, y1: e.clientY })} onMouseUp={(e) => e.button === 0 && finish(e)}
+      onContextMenu={(e) => { e.preventDefault(); useUi.setState({ tool: null }) }}>
+      {drag && r && tool === 'area' && <div className="draw-rect" style={{ left: Math.min(drag.x0, drag.x1) - r.left, top: Math.min(drag.y0, drag.y1) - r.top, width: Math.abs(drag.x1 - drag.x0), height: Math.abs(drag.y1 - drag.y0) }} />}
     </div>
   )
 }
@@ -449,8 +606,12 @@ function matchQuest(s: Schema, pages: Record<string, { body: string }>, q: Data,
 
 function FilterBar({ shown, total, snap, toggleSnap, fit }: { shown: number; total: number; snap: boolean; toggleSnap: () => void; fit: (ids?: string[]) => void }) {
   const { filters, text, payoffs, pages, schema, map, multi } = useStore()
+  const tool = useUi((s) => s.tool)
+  const hold = (t: 'area' | 'note') => useUi.setState({ tool: tool === t ? null : t })
   return (
     <div className="filterbar">
+      <button className={tool === 'area' ? 'on' : ''} onClick={() => hold('area')} title="Draw an area (A)">+ Area</button>
+      <button className={tool === 'note' ? 'on' : ''} onClick={() => hold('note')} title="Add a note (T)">+ Note</button>
       {filters.map((f) => <span key={f} className="chip on" title="Remove this filter" onClick={() => toggleFilter(f, true)}>{f.includes(':') ? f.replace(':', ': ') : label(pages, f)} ×</span>)}
       <input id="map-filter" value={text} placeholder="Filter the map (F)" onChange={(e) => useStore.setState({ text: e.target.value })} onKeyDown={(e) => e.key === 'Escape' && (e.currentTarget.blur(), useStore.setState({ text: '' }))} />
       <select value="" onChange={(e) => e.target.value && toggleFilter(e.target.value, true)}>
@@ -461,8 +622,8 @@ function FilterBar({ shown, total, snap, toggleSnap, fit }: { shown: number; tot
           {byType(pages, k).map((p) => <option key={p.data.id} value={p.data.id}>{label(pages, p.data.id)}</option>)}</optgroup>)}
       </select>
       {(filters.length > 0 || text) && <button onClick={() => useStore.setState({ filters: [], text: '' })}>Clear</button>}
-      {(map.frames?.length ?? 0) > 0 && <select value="" title="Go to a frame" onChange={(e) => e.target.value && fit([e.target.value])}>
-        <option value="">Go to frame…</option>{map.frames!.map((f) => <option key={f.id} value={f.id}>{f.label || 'Frame'}</option>)}</select>}
+      {(map.frames?.length ?? 0) > 0 && <select value="" title="Go to an area" onChange={(e) => e.target.value && fit([e.target.value])}>
+        <option value="">Go to area…</option>{map.frames!.map((f) => <option key={f.id} value={f.id}>{f.label || 'Area'}</option>)}</select>}
       <span className="count">{shown === total ? `${total} quests` : `${shown} of ${total} quests`}</span>
       <button className={snap ? 'on' : ''} onClick={toggleSnap} title="Snap to a 20 px grid; hold Alt to drag freely">Snap</button>
       <button className={payoffs ? 'on' : ''} onClick={() => useStore.setState({ payoffs: !payoffs })} title="P">Payoffs</button>

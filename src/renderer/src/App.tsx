@@ -117,6 +117,7 @@ const goBackOr = (fallback: () => void) => { const before = useStore.getState().
 
 const inText = (t: EventTarget | null) => !!(t as HTMLElement | null)?.closest?.('input, textarea, select, [contenteditable="true"]')
 const onControl = (t: EventTarget | null) => !!(t as HTMLElement | null)?.closest?.('button, a, summary, [role="menuitem"], input[type="checkbox"]')
+const tool = (t: 'area' | 'note') => window.dispatchEvent(new CustomEvent('qn:tool', { detail: t }))
 const leavePage = () => goBackOr(() => useStore.setState({ full: null }))
 function useKeys() {
   useEffect(() => {
@@ -151,7 +152,7 @@ function useKeys() {
       if (s.dialog || s.palette || s.menu || typing) return
       if (mod && (key === 'z' || key === 'y')) { e.preventDefault(); if (key === 'y' || e.shiftKey) redo(); else undo(); return }
       if (mod && key === 'g') { e.preventDefault(); window.dispatchEvent(new Event('qn:frame')); return }
-      if (mod && key === 'd') { e.preventDefault(); const id = current(); if (id) duplicate(id); return }
+      if (mod && key === 'd') { e.preventDefault(); const id = current(); if (s.view === 'map' && !s.full) window.dispatchEvent(new Event('qn:duplicate')); else if (id) duplicate(id); return }
       if (e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) { e.preventDefault(); if (e.key === 'ArrowLeft') goBack(); else goForward(); return }
       if (mod || e.altKey) return
       if ((e.key === 'Enter' || e.key === ' ') && onControl(e.target)) return // the focused button gets its own key
@@ -178,6 +179,7 @@ function useKeys() {
         g: () => { g = true; setTimeout(() => (g = false), 1200) }, n: newQuest, '?': () => useStore.setState({ dialog: 'shortcuts' }),
         p: () => useStore.setState({ payoffs: !s.payoffs }), z: () => window.dispatchEvent(new Event('qn:fit')),
         f: () => document.getElementById('map-filter')?.focus(),
+        ...(s.view === 'map' && !s.full ? { a: () => tool('area'), t: () => tool('note') } : {}),
       }
       if (act[e.key]) { e.preventDefault(); act[e.key]() }
     }

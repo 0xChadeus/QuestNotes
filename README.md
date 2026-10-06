@@ -9,23 +9,26 @@ into the engine by hand; QuestNotes never writes to the game project.
 ## Use
 
 - **Map.** One free canvas: a card stays where you put it, and nothing else moves it. Its act shows as the colour of
-  its top edge, its questline as a badge; neither decides where it sits. Drag on empty canvas to select a box of cards,
-  drag cards to move them (they snap to a 20 px grid and line up with their neighbours; hold Alt to place freely), and
-  nudge them with the arrow keys. Drag from a card's right edge to another card to add *Leads to* or a *Pays off* link
-  from a branch row, or onto empty canvas to create a connected quest; drag a link's end to reconnect it.
-  Double-click empty canvas to add a quest.
-- **Frames and notes.** Ctrl+G draws a frame around the selected cards; dragging a frame by its name carries the cards
-  inside it. Notes are text on the canvas. *Tidy* lays out a selection left to right (ELK), keeping its rough order;
-  every arrangement is one undo step. Quests not on the map wait in the Hooks tray: drag one out, or *Place all*.
-  Scroll to pan, Ctrl+scroll to zoom; zoomed out, cards shrink to their codes. Filters dim cards and never move them.
-- **Pages** open beside the map (Space) or full (Enter). In the text, `@` or `[[` links a page and `/` inserts a
-  heading, list or table; inside a table, a toolbar adds and deletes rows and columns. Everything saves as you go.
-- **Right-click** anything (a card, a link, a frame, a note, a list row, a hook) for what you can do to it: open, set
-  status, rename, duplicate, align, move, delete. Ctrl-click or Shift-click picks several cards or rows to change or delete together.
-- **Undo.** Ctrl+Z and Ctrl+Shift+Z undo and redo every change: fields, status, moves, links, new and deleted pages.
-  Deleted pages go to the Trash, where they can be read, restored or deleted for good.
-- **Cast, Handoff, Issues** and the project's own matrix are in the sidebar. `Ctrl K` finds any page or command; `?`
-  lists the shortcuts.
+  its top edge, its questline as a badge; neither decides where it sits. Drag on empty canvas to select a box of cards
+  and drag cards to move them; they snap to a 20 px grid and line up with their neighbours. Drag from a card's right
+  edge to another card to add *Leads to* or a *Pays off* link from a branch row, or onto empty canvas to create a
+  connected quest; drag a link's end to reconnect it. Double-click empty canvas to add a quest.
+- **Areas and notes.** Areas are coloured regions behind the cards. Draw one with *+ Area*, or put selected cards in
+  one from their menu. Click an empty spot inside an area to select it (a drag there still draws a selection box); a
+  selected area drags from anywhere, with everything inside it, and resizes by its edges. Its name is always a drag
+  handle; double-click it to rename. The toolbar over a selected area sets its colour, fits it to its cards or deletes
+  it (the cards stay). Notes (*+ Note*) are text on the canvas, resizable and coloured the same way; double-click one to
+  edit it. Copying and pasting cards, areas and notes keeps the links between the copied cards. *Tidy* lays out a
+  selection left to right (ELK), keeping its rough order; every arrangement is one undo step. Quests not on the map
+  wait in the Hooks tray: drag one out, or *Place all*. Zoomed out, cards shrink to their codes. Filters dim cards and
+  never move them.
+- **Pages** open beside the map or full. In the text you can link other pages and insert headings, lists and tables;
+  inside a table, a toolbar adds and deletes rows and columns. Everything saves as you go.
+- **Right-click** anything (a card, a link, an area, a note, a list row, a hook) for what you can do to it: open, set
+  status, rename, duplicate, align, move, delete. Several cards or rows can be picked to change or delete together.
+- **Undo** and redo cover every change: fields, status, moves, links, new and deleted pages. Deleted pages go to the
+  Trash, where they can be read, restored or deleted for good.
+- **Cast, Handoff, Issues** and the project's own matrix are in the sidebar.
 - **Engine link.** When the project names an engine, choose the game folder in Settings: QuestNotes reads the engine's
   quest files and shows on every quest whether it exists there. A quest marked *Ready for engine* with no engine quest
   gets an amber flag and appears under Handoff with a brief for whoever builds it.
@@ -111,7 +114,7 @@ One Markdown file per page with a YAML header, in its own git repository, separa
 ```
 questnotes.yaml        project settings
 quests/ questlines/ acts/ and one folder per kind (characters/, factions/, …)
-views/map.yaml         where each card, frame and note sits: one line each, merged by id when syncing
+views/map.yaml         where each card, area and note sits (areas as `frames`): one line each, merged by id when syncing
 views/issues.yaml      import issues not yet settled
 engine/index.yaml      last scan of the engine
 trash/

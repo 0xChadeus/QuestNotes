@@ -23,7 +23,8 @@ describe.skipIf(!run)('QuestNotes app', () => {
   const shot = (n: string) => shots ? page.screenshot({ path: path.join(shots, `${n}.png`) }) : undefined
   const center = async (sel: ReturnType<Window['locator']>) => { const b = (await sel.boundingBox())!; return { x: b.x + b.width / 2, y: b.y + b.height / 2 } }
   const pos = (id: string) => (parse(readFileSync(path.join(lore, 'views/map.yaml'), 'utf8')).nodes as { id: string; x: number; y: number }[]).find((n) => n.id === id)
-  const frames = () => (parse(readFileSync(path.join(lore, 'views/map.yaml'), 'utf8')).frames ?? []) as { id: string; label: string; x: number; y: number }[]
+  const frames = () => (parse(readFileSync(path.join(lore, 'views/map.yaml'), 'utf8')).frames ?? []) as { id: string; label: string; x: number; y: number; w: number; h: number; color?: number }[]
+  const notes = () => (parse(readFileSync(path.join(lore, 'views/map.yaml'), 'utf8')).notes ?? []) as { id: string; text: string }[]
   const drag = async (sel: ReturnType<Window['locator']>, dx: number, dy: number) => {
     const a = await center(sel)
     await page.mouse.move(a.x, a.y); await page.mouse.down(); await page.mouse.move(a.x + dx, a.y + dy, { steps: 12 }); await page.mouse.up()
@@ -166,21 +167,20 @@ describe.skipIf(!run)('QuestNotes app', () => {
     await page.locator('.peek .table-tools button', { hasText: '− Row' }).click()
     await saved('q_night_tide_copy', /^(?![\s\S]*Player tells the Guild)/); await shot('table-tools')
   })
-  it('frames the selection with Ctrl+G, and the frame carries its cards when dragged', async () => {
+  it('puts the selection in an area with Ctrl+G, and the area carries its cards when dragged by its name', async () => {
     await page.keyboard.press('Escape')
-    await page.locator('.card', { hasText: 'MQ02' }).locator('.card-head').click()
-    await page.locator('.card', { hasText: 'MQ03' }).locator('.card-head').click({ modifiers: ['Control'] })
+    await page.locator('.card', { hasText: 'Night Tide (copy)' }).locator('.card-head').click()
     await page.keyboard.press('Control+g')
-    await page.locator('input.ask').fill('Harbour run'); await page.keyboard.press('Enter')
+    await page.locator('.frame-input').fill('Harbour run'); await page.keyboard.press('Enter')
     await expect.poll(() => frames().map((f) => f.label)).toContain('Harbour run')
-    const [f0, a0, b0] = [frames().find((f) => f.label === 'Harbour run')!, pos('q_mq02')!, pos('q_mq03')!]
+    const [f0, a0, b0] = [frames().find((f) => f.label === 'Harbour run')!, pos('q_night_tide_copy')!, pos('q_mq02')!]
     await drag(page.locator('.frame-label', { hasText: 'Harbour run' }), 200, 160)
     await expect.poll(() => frames().find((f) => f.label === 'Harbour run')!.y).toBeGreaterThan(f0.y + 40)
     const f1 = frames().find((f) => f.label === 'Harbour run')!, [dx, dy] = [f1.x - f0.x, f1.y - f0.y]
-    expect(pos('q_mq02')).toEqual({ id: 'q_mq02', x: a0.x + dx, y: a0.y + dy })
-    expect(pos('q_mq03')).toEqual({ id: 'q_mq03', x: b0.x + dx, y: b0.y + dy }); await shot('frame')
+    expect(pos('q_night_tide_copy')).toEqual({ id: 'q_night_tide_copy', x: a0.x + dx, y: a0.y + dy })
+    expect(pos('q_mq02')).toEqual(b0); await shot('frame')
     await page.keyboard.press('Control+z')
-    await expect.poll(() => pos('q_mq02')).toEqual(a0)
+    await expect.poll(() => pos('q_night_tide_copy')).toEqual(a0)
   })
   it('nudges with the arrow keys, one undo step for a burst', async () => {
     await page.locator('.card', { hasText: 'MQ03' }).locator('.card-head').click()
@@ -191,12 +191,65 @@ describe.skipIf(!run)('QuestNotes app', () => {
     await page.keyboard.press('Control+z')
     await expect.poll(() => pos('q_mq03')).toEqual(was)
   })
-  it('box-selects cards by dragging on empty canvas', async () => {
-    await page.keyboard.press('Escape')
+  it('box-selects cards by dragging on empty canvas, even inside an area', async () => {
+    await page.keyboard.press('Escape'); await page.keyboard.press('Shift+Digit1'); await page.waitForTimeout(400)
     const [a, b] = [await page.locator('.react-flow__node', { hasText: 'MQ02' }).boundingBox(), await page.locator('.react-flow__node', { hasText: 'MQ03' }).boundingBox()]
     const [x0, y0, x1, y1] = [Math.min(a!.x, b!.x) - 30, Math.min(a!.y, b!.y) - 30, Math.max(a!.x + a!.width, b!.x + b!.width) + 30, Math.max(a!.y + a!.height, b!.y + b!.height) + 30]
     await page.mouse.move(x0, y0); await page.mouse.down(); await page.mouse.move(x1, y1, { steps: 10 }); await page.mouse.up()
     await expect.poll(() => page.locator('.card.sel').count()).toBeGreaterThanOrEqual(2); await shot('box-select')
+    await page.keyboard.press('Escape')
+  })
+  it('picks an area with a click inside it, then drags it from anywhere and resizes it', async () => {
+    await page.keyboard.press('Shift+Digit1'); await page.waitForTimeout(400)
+    const act = page.locator('.react-flow__node-frame', { hasText: 'Act I' }), f0 = frames().find((f) => f.label.startsWith('Act I'))!
+    const name = (await act.locator('.frame-label').boundingBox())!, at = { x: name.x + name.width + 120, y: name.y + name.height / 2 }
+    await page.mouse.click(at.x, at.y)
+    await expect.poll(() => act.getAttribute('class')).toContain('selected')
+    await drag(act.locator('.react-flow__resize-control.handle.bottom.right'), -60, -30)
+    await expect.poll(() => frames().find((f) => f.id === f0.id)!.w).toBeLessThan(f0.w - 20)
+    await page.mouse.move(at.x, at.y); await page.mouse.down(); await page.mouse.move(at.x + 120, at.y + 80, { steps: 12 }); await page.mouse.up()
+    await expect.poll(() => frames().find((f) => f.id === f0.id)!.x).toBeGreaterThan(f0.x + 40)
+    await page.keyboard.press('Control+z'); await page.keyboard.press('Control+z')
+    await expect.poll(() => frames().find((f) => f.id === f0.id)).toEqual(f0)
+    await page.keyboard.press('Escape')
+  })
+  it('draws a new area with A, names it in place, recolours and deletes it', async () => {
+    const view = (await page.locator('.react-flow').boundingBox())!, cove = () => frames().find((f) => f.label === 'Smugglers cove')
+    await page.mouse.move(view.x + view.width / 2, view.y + view.height / 2); await page.mouse.wheel(0, 6000); await page.waitForTimeout(300)
+    await page.keyboard.press('a')
+    await page.mouse.move(view.x + 400, view.y + 200); await page.mouse.down(); await page.mouse.move(view.x + 700, view.y + 400, { steps: 8 }); await page.mouse.up()
+    await page.locator('.frame-input').fill('Smugglers cove'); await page.keyboard.press('Enter')
+    await expect.poll(() => cove()?.w).toBeGreaterThan(100)
+    const w0 = cove()!.w
+    await drag(page.locator('.react-flow__node-frame.selected .react-flow__resize-control.handle.bottom.right'), 100, 60)
+    await expect.poll(() => cove()!.w).toBeGreaterThan(w0)
+    await page.locator('.node-tools button[title="Green"]').click()
+    await expect.poll(() => cove()!.color).toBe(3); await shot('area')
+    await page.keyboard.press('Delete')
+    await expect.poll(() => cove()).toBeUndefined()
+    await page.keyboard.press('Control+z'); await expect.poll(() => cove()?.color).toBe(3)
+    await page.keyboard.press('Control+Shift+z'); await expect.poll(() => cove()).toBeUndefined()
+  })
+  it('adds a note with T, then copies, pastes and deletes it', async () => {
+    const view = (await page.locator('.react-flow').boundingBox())!, n0 = notes().length
+    await page.keyboard.press('t'); await page.mouse.click(view.x + 300, view.y + 300)
+    await page.locator('.note-input').fill('Check the tide tables'); await page.keyboard.press('Control+Enter')
+    await expect.poll(() => notes().map((n) => n.text)).toContain('Check the tide tables')
+    await page.keyboard.press('Control+c'); await page.mouse.move(view.x + 700, view.y + 300); await page.keyboard.press('Control+v')
+    await expect.poll(() => notes().length).toBe(n0 + 2)
+    await page.keyboard.press('Control+z'); await expect.poll(() => notes().length).toBe(n0 + 1)
+    await page.locator('.note', { hasText: 'Check the tide tables' }).click(); await page.keyboard.press('Delete')
+    await expect.poll(() => notes().length).toBe(n0)
+  })
+  it('duplicates the selected cards with Ctrl+D in one undo step', async () => {
+    await page.keyboard.press('Escape'); await page.keyboard.press('Shift+Digit1'); await page.waitForTimeout(400)
+    const n = await page.locator('.react-flow__node-quest').count()
+    await page.locator('.card', { hasText: 'MQ02' }).locator('.card-head').click()
+    await page.locator('.card', { hasText: 'MQ03' }).locator('.card-head').click({ modifiers: ['Control'] })
+    await page.keyboard.press('Control+d')
+    await expect.poll(() => page.locator('.react-flow__node-quest').count()).toBe(n + 2)
+    await page.keyboard.press('Control+z')
+    await expect.poll(() => page.locator('.react-flow__node-quest').count()).toBe(n)
     await page.keyboard.press('Escape')
   })
   it('tidies a selection and places every hook', async () => {
