@@ -1,12 +1,12 @@
 // The page body: TipTap over Markdown. @ or [[ links a page, / inserts a block. Saves on a pause in typing.
 import { useEffect, useRef } from 'react'
-import { useEditor, EditorContent, type Editor as TEditor } from '@tiptap/react'
+import { useEditor, useEditorState, EditorContent, type Editor as TEditor } from '@tiptap/react'
 import { Editor as Core, Extension, type Range } from '@tiptap/core'
 import Suggestion, { type SuggestionOptions } from '@tiptap/suggestion'
 import { PluginKey } from '@tiptap/pm/state'
 import { extensions, WikiLink } from '../../shared/markdown'
 import { canonBody, type Page } from '../../shared/page'
-import { useStore, update, peek, createPage } from './store'
+import { useStore, update, peek, createPage, toast } from './store'
 import { label } from './derive'
 import { castKind, kindOf } from '../../shared/schema'
 
@@ -92,10 +92,13 @@ export function Editor({ id }: { id: string }) {
   const last = useRef(body)
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined)
   const flush = useRef<() => void>(() => {})
+  const dirty = useRef(false)
   const editor = useEditor({
     extensions: EXT, content: body, contentType: 'markdown',
     onUpdate: ({ editor: e }) => {
+      dirty.current = true
       flush.current = () => {
+        dirty.current = false
         const md = canonBody(e.getMarkdown())
         if (md !== last.current) { last.current = md; update(id, (p) => ({ ...p, body: md })) }
       }
@@ -103,11 +106,40 @@ export function Editor({ id }: { id: string }) {
       timer.current = setTimeout(() => flush.current(), 500)
     },
   }, [id])
-  useEffect(() => () => { clearTimeout(timer.current); flush.current() }, [id])
   useEffect(() => {
-    if (editor && body !== last.current && !editor.isFocused) { last.current = body; editor.commands.setContent(body, { contentType: 'markdown' }) }
-  }, [body, editor])
-  return <EditorContent editor={editor} className="prose" spellCheck />
+    const now = () => { clearTimeout(timer.current); flush.current() }
+    window.addEventListener('qn:flush', now)
+    return () => { window.removeEventListener('qn:flush', now); now() }
+  }, [id])
+  const inTable = useEditorState({ editor, selector: ({ editor: e }) => !!e?.isActive('table') })
+  // The text changed elsewhere (undo, git, another editor): show it, keeping the cursor. Mid-typing, the designer's text wins and they may take the other.
+  useEffect(() => {
+    if (!editor || body === last.current) return
+    if (dirty.current) {
+      const theirs = body
+      toast('This page changed on disk while you were typing; your text is kept.', { label: 'Use theirs', run: () => {
+        clearTimeout(timer.current); dirty.current = false; last.current = theirs
+        editor.commands.setContent(theirs, { contentType: 'markdown', emitUpdate: false }); update(id, (p) => ({ ...p, body: theirs }))
+      } }, `theirs:${id}`)
+      return
+    }
+    last.current = body
+    const { from, to } = editor.state.selection
+    editor.commands.setContent(body, { contentType: 'markdown', emitUpdate: false })
+    if (editor.isFocused) { const end = editor.state.doc.content.size - 1; editor.commands.setTextSelection({ from: Math.min(from, end), to: Math.min(to, end) }) }
+  }, [body, editor, id])
+  const t = (label: string, title: string, run: (c: ReturnType<TEditor['chain']>) => ReturnType<TEditor['chain']>) =>
+    <button key={label} title={title} onMouseDown={(e) => { e.preventDefault(); run(editor!.chain().focus()).run() }}>{label}</button>
+  return (
+    <div className="body">
+      {inTable && <div className="table-tools">
+        {t('+ Row above', 'Add a row above this one', (c) => c.addRowBefore())}{t('+ Row below', 'Add a row below this one', (c) => c.addRowAfter())}
+        {t('− Row', 'Delete this row', (c) => c.deleteRow())}{t('+ Column', 'Add a column to the right', (c) => c.addColumnAfter())}
+        {t('− Column', 'Delete this column', (c) => c.deleteColumn())}{t('Delete table', 'Delete the whole table', (c) => c.deleteTable())}
+      </div>}
+      <EditorContent editor={editor} className="prose" spellCheck />
+    </div>
+  )
 }
 
 /** Imported bodies are stored in the editor's own Markdown form, so opening a page never rewrites its file. */

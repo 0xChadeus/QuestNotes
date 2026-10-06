@@ -1,8 +1,8 @@
 import { useMemo, useState } from 'react'
-import { useStore, setData, peek, openFull, trashPage, toast } from './store'
+import { useStore, setData, peek, openFull, trashPage, toast, showOnMap, duplicate, ask, renameSubsection, removeSubsection } from './store'
 import { call } from './api'
 import { Editor } from './Editor'
-import { Chip, EngineBadge, Picker } from './ui'
+import { Chip, EngineBadge, Picker, openMenu, pageMenu } from './ui'
 import { byType, completeness, derive, kindLabel, label, roles, roman } from './derive'
 import { castKind, extraKey, giverField, STATUSES, STATUS_LABEL, type Field, type Row } from '../../shared/schema'
 import { characterState, opensInEditor, questState, stateLabel, suggestCharacterId, suggestQuestId } from '../../shared/engine'
@@ -20,7 +20,8 @@ export function PageView({ id, inPeek }: { id: string; inPeek?: boolean }) {
   return (
     <article className={`page t-${d.type}`}>
       <header className="page-head">
-        <div className="kind">{kindLabel(schema, d.type)}{d.type === 'act' && d.order ? ` ${roman(d.order)}` : ''}</div>
+        <div className="kind">{kindLabel(schema, d.type)}{d.type === 'act' && d.order ? ` ${roman(d.order)}` : ''}
+          <button className="more" title="More actions" onClick={(e) => openMenu(e, pageMenu(id))}>⋯</button></div>
         <div className="titles">
           {d.type === 'quest' && <input className="code" value={d.code ?? ''} placeholder="Code" onChange={(e) => set({ code: e.target.value })} />}
           <input className="title" value={d.title} placeholder="Title" autoFocus={!d.title} onChange={(e) => set({ title: e.target.value })} spellCheck />
@@ -28,7 +29,7 @@ export function PageView({ id, inPeek }: { id: string; inPeek?: boolean }) {
         {d.type === 'quest' && <>
           <input className="synopsis" value={d.synopsis ?? ''} placeholder="One line for the map card" onChange={(e) => set({ synopsis: e.target.value })} spellCheck />
           <div className="status-row">
-            <div className="seg">{STATUSES.map((s) => <button key={s} className={d.status === s ? `on s-${s}` : ''} onClick={() => set({ status: s })}>{STATUS_LABEL[s]}</button>)}</div>
+            <div className="seg">{STATUSES.map((s) => <button key={s} className={d.status === s ? `on s-${s}` : ''} onClick={() => setData(id, { status: s }, `Set ${d.title || 'quest'} to ${STATUS_LABEL[s]}`)}>{STATUS_LABEL[s]}</button>)}</div>
             <Completeness p={p} />
           </div>
         </>}
@@ -43,6 +44,8 @@ export function PageView({ id, inPeek }: { id: string; inPeek?: boolean }) {
       <Related p={p} />
       <footer className="page-actions">
         {inPeek && <button onClick={() => openFull(id)}>Open full <kbd>Ctrl Enter</kbd></button>}
+        {d.type === 'quest' && <button onClick={() => showOnMap(id)}>Show on map</button>}
+        <button onClick={() => duplicate(id)}>Duplicate</button>
         <button onClick={() => call('shell:open', p.file)}>Open in another editor</button>
         <button className="danger" onClick={() => trashPage(id)}>Move to Trash</button>
       </footer>
@@ -65,6 +68,7 @@ function FieldView({ p, f }: { p: Page; f: Field }) {
   if (f.kind === 'text' || f.kind === 'number') input = <input type={f.kind} value={v ?? ''} onChange={(e) => set(f.kind === 'number' ? (e.target.value === '' ? undefined : +e.target.value) : e.target.value)} />
   else if (f.kind === 'long') input = <textarea value={v ?? ''} rows={3} onChange={(e) => set(e.target.value)} spellCheck />
   else if (f.kind === 'select') input = <select value={v ?? ''} onChange={(e) => set(e.target.value || undefined)}><option value="">—</option>{f.options!.map((o) => <option key={o}>{o}</option>)}</select>
+  else if (p.data.type === 'act' && f.key === 'subsections') input = <Subsections p={p} />
   else if (f.kind === 'tags') input = <input value={(v ?? []).join(', ')} placeholder="Comma-separated" onChange={(e) => set(e.target.value.split(/,\s*/))} />
   else if (f.kind === 'subsection') {
     const subs: string[] = pages[p.data.act]?.data.subsections ?? []
@@ -74,15 +78,44 @@ function FieldView({ p, f }: { p: Page; f: Field }) {
   return <div className={`field k-${f.kind}`}><label>{f.label}</label>{input}</div>
 }
 
+/** An act's sub-sections, one per line: renaming or removing one carries its quests along. */
+function Subsections({ p }: { p: Page }) {
+  const subs: string[] = (p.data.subsections ?? []).filter(Boolean)
+  const [draft, setDraft] = useState<Record<string, string>>({})
+  const commit = (x: string) => {
+    const v = draft[x]?.trim()
+    setDraft((d) => { const n = { ...d }; delete n[x]; return n })
+    if (v && v !== x) { if (subs.includes(v)) toast(`${p.data.title} already has a sub-section called ${v}.`); else renameSubsection(p.data.id, x, v) }
+  }
+  const swap = (i: number, j: number) => { const n = [...subs]; [n[i], n[j]] = [n[j], n[i]]; setData(p.data.id, { subsections: n }, `Move ${subs[i]}`) }
+  return (
+    <div className="rows">
+      {subs.map((x, i) => <div key={x} className="row">
+        <input className="free" value={draft[x] ?? x} onChange={(e) => setDraft({ ...draft, [x]: e.target.value })} onBlur={() => commit(x)} onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()} spellCheck />
+        <button className="mini" title="Move earlier" disabled={i === 0} onClick={() => swap(i, i - 1)}>↑</button>
+        <button className="mini" title="Move later" disabled={i === subs.length - 1} onClick={() => swap(i, i + 1)}>↓</button>
+        <button className="x" title="Remove; its quests move to the first column" onClick={() => removeSubsection(p.data.id, x)}>×</button></div>)}
+      <span className="ref"><button className="link" onClick={() => ask({ title: `New sub-section of ${p.data.title}`, value: '', ok: 'Add',
+        run: (v) => subs.includes(v) ? toast(`${p.data.title} already has ${v}.`) : setData(p.data.id, { subsections: [...subs, v] }, `Add ${v}`) })}>+ Add sub-section</button></span>
+    </div>
+  )
+}
+
 function Rows({ p, f }: { p: Page; f: Field }) {
   const rows: Row[] = p.data[f.key] ?? []
   const [pick, setPick] = useState(false)
   const set = (next: Row[]) => setData(p.data.id, { [f.key]: next })
   const patch = (i: number, r: Partial<Row>) => set(rows.map((x, n) => (n === i ? { ...x, ...r } : x)))
+  const swap = (i: number, j: number) => { const n = [...rows]; [n[i], n[j]] = [n[j], n[i]]; set(n) }
+  const menu = (e: React.MouseEvent, i: number) => openMenu(e, [
+    ...(rows[i].ref ? [{ label: 'Open', run: () => peek(rows[i].ref!) }, '-' as const] : []),
+    { label: 'Move up', run: () => i > 0 && swap(i, i - 1) }, { label: 'Move down', run: () => i < rows.length - 1 && swap(i, i + 1) },
+    '-', { label: 'Remove', danger: true, run: () => set(rows.filter((_, n) => n !== i)) },
+  ])
   return (
     <div className="rows">
       {rows.map((r, i) => (
-        <div key={i} className="row">
+        <div key={i} className="row" onContextMenu={(e) => !(e.target as HTMLElement).closest('input, textarea, select') && menu(e, i)}>
           {r.ref ? <Chip id={r.ref} /> : r.none ? <span className="none">None</span> : <input className="free" value={r.text ?? ''} placeholder="Free text" onChange={(e) => patch(i, { text: e.target.value })} />}
           {(f.extras ?? []).map((x) => { const k = extraKey(x); return typeof x === 'object'
             ? <select key={k} className={r[k] ? '' : 'empty'} value={r[k] ?? ''} onChange={(e) => patch(i, { [k]: e.target.value || undefined })}><option value="">{k}</option>{x.options.map((o) => <option key={o}>{o}</option>)}</select>
@@ -135,7 +168,7 @@ function EnginePicker({ onPick, onClose }: { onPick: (id: string, kind: string) 
   const engine = useStore((s) => s.engine)
   const [q, setQ] = useState('')
   const list = Object.entries(engine?.quests ?? {}).filter(([k, v]) => `${k} ${v[0].title}`.toLowerCase().includes(q.toLowerCase()))
-  return <div className="picker"><input autoFocus value={q} placeholder="Engine quests…" onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.key === 'Escape' && onClose()} />
+  return <div className="picker"><input autoFocus value={q} placeholder="Engine quests…" onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); onClose() } }} />
     <ul>{list.map(([k, v]) => <li key={k} onMouseDown={() => { onPick(k, v[0].kind); onClose() }}>{k} · {v[0].title}<small>{v[0].stages.length} stages{v[0].kind && ` · ${v[0].kind}`}</small></li>)}</ul></div>
 }
 

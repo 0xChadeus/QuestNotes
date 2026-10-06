@@ -1,6 +1,6 @@
 // The read-only link to a game project: scan its quest and character files as the project's engine config describes them,
 // and talk to the QuestNotes Bridge addon in a running Godot editor.
-import { promises as fs, watch, existsSync, type FSWatcher } from 'node:fs'
+import { promises as fs, watch, existsSync, readdirSync, type FSWatcher } from 'node:fs'
 import { spawn, execFileSync } from 'node:child_process'
 import path from 'node:path'
 import type { EngineConfig, EngineIndex, EngineQuest } from '../shared/engine'
@@ -47,10 +47,22 @@ export async function scan(game: string, e: EngineConfig): Promise<EngineIndex> 
   return { scanned: new Date().toISOString().slice(0, 10), source: 'game', quests, characters: [...characters].sort() }
 }
 
-export function watchGame(game: string, e: EngineConfig, onChange: () => void): FSWatcher[] {
+export function watchGame(game: string, e: EngineConfig, onChange: () => void) {
   const dirs = [e.quests?.files, e.characters?.files].filter(Boolean).map((g) => path.join(game, g!.split('/*')[0]))
+  return dirs.filter((d) => existsSync(d)).map((d) => watchTree(d, onChange))
+}
+
+/** Watches a folder and every folder below it, one watcher each (see Workspace.watch for why not `recursive`), adding new folders as they appear. */
+export function watchTree(dir: string, onChange: () => void) {
+  const all = new Map<string, FSWatcher>()
   let t: NodeJS.Timeout
-  return dirs.filter((d) => existsSync(d)).map((d) => watch(d, { recursive: true }, () => { clearTimeout(t); t = setTimeout(onChange, 300) }))
+  const fire = () => { clearTimeout(t); t = setTimeout(() => { add(dir); onChange() }, 300) }
+  const add = (d: string) => {
+    if (!all.has(d)) try { all.set(d, watch(d, fire).on('error', () => { all.get(d)?.close(); all.delete(d) })) } catch { return }
+    try { for (const x of readdirSync(d, { withFileTypes: true })) if (x.isDirectory()) add(path.join(d, x.name)) } catch { /* gone */ }
+  }
+  add(dir)
+  return { close: () => all.forEach((w) => w.close()) }
 }
 
 /** Client of the QuestNotes Bridge addon: a token-checked WebSocket on 127.0.0.1, found through .godot/questnotes_bridge.json. */

@@ -3,7 +3,7 @@ import { app } from 'electron'
 import { readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 
-interface Settings { recent: string[]; godot?: string; games: Record<string, string> }
+interface Settings { recent: string[]; godot?: string; games: Record<string, string>; zoom?: number }
 const file = () => path.join(app.getPath('userData'), 'settings.json')
 
 export function load(): Settings {

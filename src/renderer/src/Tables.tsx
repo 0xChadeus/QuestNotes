@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useStore, peek, update, createPage, toast } from './store'
+import { useStore, peek, update, createPage, toast, trashPage, trashPages, reorder, restorePage, lastChange, undo, setBinned, pruneMap } from './store'
 import { call } from './api'
 import { byType, issues, kindLabel, label, roles, roman, type Pages } from './derive'
-import { Chip, StatusPill } from './ui'
+import { Chip, StatusPill, openMenu, pageMenu } from './ui'
 import { openInEngine } from './PageView'
 import { opensInEditor, questState, stateLabel, type QuestState } from '../../shared/engine'
-import { castFields, castKind, extraKey, giverField, kindOf, type Row } from '../../shared/schema'
+import { castFields, castKind, extraKey, giverField, kindOf, STATUSES, type Row } from '../../shared/schema'
 import type { Page } from '../../shared/page'
 
 /** Quests grouped by Act, in map order. */
@@ -58,7 +58,7 @@ export function Cast() {
     .map((x) => ({ ...x, n: x.cells.filter((r) => r.length).length }))
     .filter((x) => (orphans ? !x.n : all || x.n))
     .sort((a, b) => b.n - a.n || a.c.data.title.localeCompare(b.c.data.title))
-  const addTo = (q: Page, ch: string) => { update(q.data.id, (p) => ({ ...p, data: { ...p.data, [add.key]: [...(p.data[add.key] ?? []), { ref: ch }] } })); toast(`Added ${pages[ch].data.title} to ${add.label} in ${label(pages, q.data.id)}`) }
+  const addTo = (q: Page, ch: string) => { update(q.data.id, (p) => ({ ...p, data: { ...p.data, [add.key]: [...(p.data[add.key] ?? []), { ref: ch }] } })); const c = lastChange(); toast(`Added ${pages[ch].data.title} to ${add.label} in ${label(pages, q.data.id)}`, { label: 'Undo', run: () => undo(c) }) }
   const plural = kindOf(schema, kind)?.plural ?? kind
   return (
     <div className="table-view">
@@ -118,7 +118,8 @@ export function Issues() {
   return (
     <div className="table-view">
       <div className="toolbar"><h2>Issues</h2><span className="muted">{list.length} open</span></div>
-      {project?.errors.map((e) => <div key={e.file} className="issue"><b>Unreadable file</b> {e.file}: {e.error}</div>)}
+      {project?.errors.map((e) => <div key={e.file} className="issue">{e.file.endsWith('/') ? <><b>Hidden pages</b> {e.error}.
+        <button onClick={() => useStore.setState({ dialog: 'project' })}>Project settings</button></> : <><b>Unreadable file</b> {e.file}: {e.error}</>}</div>)}
       {kinds.map((k) => <section key={k}><h4>{k}</h4>{list.filter((i) => i.kind === k).map((i, n) =>
         <div key={n} className="issue"><span>{i.text}</span>{i.id && <button onClick={() => peek(i.id!)}>Go</button>}{k === 'Import' && <button onClick={() => dismiss(i.text)}>Settled</button>}</div>)}</section>)}
       {!list.length && <p className="empty">Nothing open.</p>}
@@ -127,37 +128,73 @@ export function Issues() {
 }
 
 export function PageList({ type }: { type: string }) {
-  const { pages, schema } = useStore()
+  const { pages, schema, selected, multi } = useStore()
   const list = byType(pages, type)
   const [q, setQ] = useState('')
-  const shown = list.filter((p) => `${p.data.code ?? ''} ${p.data.title} ${(p.data.aliases ?? []).join(' ')}`.toLowerCase().includes(q.toLowerCase()))
+  const [sort, setSort] = useState<{ col: number; dir: 1 | -1 } | null>(null)
   const fields = schema.fields[type] ?? []
   const select = fields.find((f) => f.kind === 'select'), ref = fields.find((f) => f.kind === 'ref')
-  const k = kindOf(schema, type)
+  const k = kindOf(schema, type), ordered = type === 'act' || type === 'questline'
+  const name = (p: Page) => label(pages, p.data.id) || 'Untitled'
+  // Columns: a header, and the text each row shows (and sorts by) under it.
+  const cols: [string, (p: Page) => string][] = type === 'quest'
+    ? [['Quest', name], ['Status', (p) => String(STATUSES.indexOf(p.data.status ?? 'idea'))], ['Act', (p) => (pages[p.data.act] ? label(pages, p.data.act) : '')], ['Questline', (p) => pages[p.data.questline]?.data.title ?? '']]
+    : [[k?.label ?? type, name], [select?.label ?? 'Aliases', (p) => (select && p.data[select.key]) ?? (p.data.aliases ?? []).join(', ')],
+      ...(ref ? [[ref.label, (p: Page) => (p.data[ref.key] ? label(pages, p.data[ref.key]) : '')] as [string, (p: Page) => string]] : [])]
+  const shown = list.filter((p) => `${p.data.code ?? ''} ${p.data.title} ${(p.data.aliases ?? []).join(' ')}`.toLowerCase().includes(q.toLowerCase()))
+  if (sort) shown.sort((a, b) => sort.dir * cols[sort.col][1](a).localeCompare(cols[sort.col][1](b), undefined, { numeric: true }))
+  // The checked rows are the app's picked set, so Delete and 1 to 5 act on all of them.
+  const picked = new Set(multi)
+  const setPicked = (ids: string[]) => useStore.setState({ multi: ids })
+  const toggle = (id: string) => setPicked(picked.has(id) ? multi.filter((x) => x !== id) : [...multi, id])
+  const live = multi.filter((id) => pages[id])
+  const all = shown.length > 0 && shown.every((p) => picked.has(p.data.id))
   return (
     <div className="table-view">
-      <div className="toolbar"><h2>{k?.plural ?? type}</h2><input value={q} placeholder="Filter…" onChange={(e) => setQ(e.target.value)} />
-        <button onClick={async () => peek(await createPage(type, '', type === 'act' ? { order: list.length + 1, subsections: [] } : type === 'questline' ? { order: list.length + 1, kind: 'side' } : {}))}>New {(k?.label ?? type).toLowerCase()}</button></div>
-      <div className="scroll"><table className="grid list"><tbody>{shown.map((p) => <tr key={p.data.id} onClick={() => peek(p.data.id)}>
-        <th>{label(pages, p.data.id) || <i>Untitled</i>}</th>
-        <td>{type === 'quest' ? <StatusPill s={p.data.status} /> : (select && p.data[select.key]) ?? (p.data.aliases ?? []).join(', ')}</td>
-        <td className="muted">{ref && p.data[ref.key] ? label(pages, p.data[ref.key]) : ''}</td>
-      </tr>)}</tbody></table></div>
+      <div className="toolbar"><h2>{k?.plural ?? type}</h2>
+        <input value={q} placeholder="Filter… (Ctrl F)" onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => { if (e.key === 'Escape') { e.preventDefault(); setQ(''); e.currentTarget.blur() } }} />
+        <button onClick={async () => peek(await createPage(type, ''))}>New {(k?.label ?? type).toLowerCase()}</button>
+        {live.length > 0 && <span className="bulk">{live.length} selected
+          <button className="danger" title="Delete" onClick={async () => { await trashPages(live); setPicked([]) }}>Move to Trash</button>
+          <button onClick={() => setPicked([])}>Clear</button></span>}</div>
+      {!list.length && <p className="empty">No {(k?.plural ?? type).toLowerCase()} yet.</p>}
+      {list.length > 0 && <div className="scroll"><table className="grid list"><thead><tr>
+        <th className="pick"><input type="checkbox" title="Select all shown" checked={all} onChange={() => setPicked(all ? [] : shown.map((p) => p.data.id))} /></th>
+        {cols.map(([h], i) => <th key={h} title="Sort by this column" onClick={() => setSort(sort?.col === i ? (sort.dir === 1 ? { col: i, dir: -1 } : null) : { col: i, dir: 1 })}>{h}{sort?.col === i ? (sort.dir === 1 ? ' ↑' : ' ↓') : ''}</th>)}<th /></tr></thead>
+        <tbody>{shown.map((p, i) => <tr key={p.data.id} className={selected === p.data.id || picked.has(p.data.id) ? 'sel' : ''} onContextMenu={(e) => openMenu(e, pageMenu(p.data.id))}
+          onClick={(e) => (e.ctrlKey || e.metaKey || e.shiftKey ? toggle(p.data.id) : peek(p.data.id))}>
+          <td className="pick" onClick={(e) => e.stopPropagation()}><input type="checkbox" checked={picked.has(p.data.id)} onChange={() => toggle(p.data.id)} /></td>
+          {cols.map(([h, show], c) => c === 0 ? <th key={h}>{label(pages, p.data.id) || <i>Untitled</i>}</th>
+            : <td key={h} className={c > 1 ? 'muted' : ''}>{type === 'quest' && c === 1 ? <StatusPill s={p.data.status} /> : show(p)}</td>)}
+          <td className="row-actions" onClick={(e) => e.stopPropagation()}>
+            {ordered && !q && !sort && <><button className="mini" title="Move earlier" disabled={i === 0} onClick={() => reorder(p.data.id, -1)}>↑</button><button className="mini" title="Move later" disabled={i === shown.length - 1} onClick={() => reorder(p.data.id, 1)}>↓</button></>}
+            <button className="mini" title="More (right-click)" onClick={(e) => openMenu(e, pageMenu(p.data.id))}>⋯</button>
+            <button className="mini danger" title="Move to Trash (Delete)" onClick={() => trashPage(p.data.id)}>Delete</button></td>
+        </tr>)}</tbody></table></div>}
     </div>
   )
 }
 
 export function Trash() {
   const [list, setList] = useState<Page[]>([])
-  const schema = useStore((s) => s.schema)
-  const refresh = () => call('trash:list').then(setList)
+  const [open, setOpen] = useState<string | null>(null)
+  const { schema, pages } = useStore()
+  const refresh = () => call('trash:list').then((l) => { setList(l); setBinned(l.map((p) => p.data.id)); pruneMap(l.map((p) => p.data.id)) })
   useEffect(() => { refresh() }, [])
+  const forever = async (p: Page) => { if (confirm(`Delete “${p.data.title || 'Untitled'}” for good? This cannot be undone.`)) { await call('trash:delete', p.file); refresh() } }
   return (
     <div className="table-view">
-      <div className="toolbar"><h2>Trash</h2>{list.length > 0 && <button className="danger" onClick={async () => { if (confirm(`Delete ${list.length} pages for good?`)) { await call('trash:empty'); refresh() } }}>Empty Trash</button>}</div>
-      {!list.length && <p className="empty">The Trash is empty.</p>}
-      <table className="grid list"><tbody>{list.map((p) => <tr key={p.file}><th>{p.data.title}</th><td>{kindLabel(schema, p.data.type)}</td>
-        <td><button onClick={async () => { await call('page:restore', p.file); useStore.setState({ pages: { ...useStore.getState().pages, [p.data.id]: p } }); refresh() }}>Restore</button></td></tr>)}</tbody></table>
+      <div className="toolbar"><h2>Trash</h2>{list.length > 0 && <><span className="muted">{list.length} page{list.length > 1 ? 's' : ''}. Click one to read it.</span>
+        <button className="danger" onClick={async () => { if (confirm(`Delete ${list.length} pages for good? This cannot be undone.`)) { await call('trash:empty'); refresh() } }}>Empty Trash</button></>}</div>
+      {!list.length && <p className="empty">The Trash is empty. Deleted pages wait here until you empty it.</p>}
+      <table className="grid list"><tbody>{list.flatMap((p) => {
+        const taken = !!pages[p.data.id]
+        return [<tr key={p.file} onClick={() => setOpen(open === p.file ? null : p.file)}><th>{open === p.file ? '▾ ' : '▸ '}{p.data.title || <i>Untitled</i>}</th><td>{kindLabel(schema, p.data.type)}</td>
+          <td className="row-actions always" onClick={(e) => e.stopPropagation()}>
+            <button disabled={taken} title={taken ? 'A page with the same id exists; rename or delete that one first' : 'Put it back'} onClick={async () => { await restorePage(p); refresh() }}>Restore</button>
+            <button className="danger" onClick={() => forever(p)}>Delete forever</button></td></tr>,
+          ...(open === p.file ? [<tr key={`${p.file}:body`} className="preview"><td colSpan={3}><pre>{p.body.trim() || '(no text)'}</pre></td></tr>] : [])]
+      })}</tbody></table>
     </div>
   )
 }

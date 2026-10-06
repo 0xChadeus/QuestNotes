@@ -7,10 +7,17 @@ export interface Page { file: string; data: Data; body: string }
 
 const FRONT = /^---\n([\s\S]*?\n)?---\n\n?/
 
-export function parsePage(text: string, file = ''): Page {
+/** Reads a page. A header without a title (an empty title is never written), id or type still makes a page: the id comes
+ *  from the file name, the type from its folder (`kinds` maps folder to type), the title is empty. */
+export function parsePage(text: string, file = '', kinds: Record<string, string> = {}): Page {
   const m = FRONT.exec(text.replace(/\r\n/g, '\n'))
   if (!m) throw new Error(`${file}: no front matter`)
-  return { file, data: (parse(m[1] ?? '') ?? {}) as Data, body: text.slice(m[0].length) }
+  const data = parse(m[1] ?? '') ?? {}
+  if (typeof data !== 'object' || Array.isArray(data)) throw new Error(`${file}: the header is not a set of fields`)
+  data.id = String(data.id ?? file.split('/').pop()!.replace(/(~\d+)?\.md$/, ''))
+  data.type = String(data.type ?? kinds[file.split('/')[0]] ?? '')
+  data.title = data.title == null ? '' : String(data.title)
+  return { file, data: data as Data, body: text.slice(m[0].length) }
 }
 
 /** Top-level keys one per line, list items as one-line {…} maps, quoting only where needed, never folded. */
@@ -87,6 +94,16 @@ export function addPayoff(body: string, line: number, target: string): string {
   const cells = splitRow(lines[line])
   while (cells.length < 3) cells.push('')
   if (!bodyLinks(cells[2]).includes(target)) cells[2] = `${cells[2]} [[${target}]]`.trim()
+  lines[line] = `| ${cells.join(' | ')} |`
+  return lines.join('\n')
+}
+
+/** Takes a [[target]] (with or without a label) out of the "Pays off in" cell of one branching row. */
+export function removePayoff(body: string, line: number, target: string): string {
+  const lines = body.split('\n')
+  const cells = splitRow(lines[line])
+  if (cells.length < 3) return body
+  cells[2] = cells[2].replace(new RegExp(`\\s*\\[\\[${target.replace(/[/]/g, '\\/')}(\\|[^\\]]*)?\\]\\]`, 'g'), '').trim()
   lines[line] = `| ${cells.join(' | ')} |`
   return lines.join('\n')
 }

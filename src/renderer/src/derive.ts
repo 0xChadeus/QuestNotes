@@ -1,6 +1,8 @@
-// Everything computed from the pages: backlinks, payoffs, cast roles, completeness, issues. Nothing here is stored.
+// Everything computed from the pages: backlinks, payoffs, links, cast roles, completeness, issues. Nothing here is stored.
 import { branches, refsOf, type Data, type Page } from '../../shared/page'
 import { castFields, castKind, giverField, kindOf, type Row, type Schema } from '../../shared/schema'
+import { roman } from '../../shared/map'
+export { roman }
 
 export type Pages = Record<string, Page>
 
@@ -13,7 +15,6 @@ export function label(pages: Pages, id?: string) {
   if (!d) return id ?? ''
   return d.type === 'act' ? `Act ${roman(d.order ?? 0)} · ${d.title}` : d.code ? `${d.code} ${d.title}` : d.title || 'Untitled'
 }
-export const roman = (n: number) => ['', 'I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X'][n] ?? String(n)
 export const kindLabel = (s: Schema, type: string) => kindOf(s, type)?.label ?? type
 
 interface Payoff { from: string; condition: string; outcome: string; line: number }
@@ -27,6 +28,15 @@ export function derive(s: Schema, pages: Pages) {
       (incoming.get(t) ?? incoming.set(t, []).get(t)!).push({ from: p.data.id, condition: b.condition, outcome: b.outcome, line: b.line })
   }
   return { backlinks, incoming }
+}
+
+/** Every link between quests: "leads to" from the header, payoffs from branch rows (with the row's line and condition). */
+export type QuestLink = { from: string; to: string; kind: 'leads' | 'payoff'; line?: number; condition?: string }
+export function links(s: Schema, pages: Pages): QuestLink[] {
+  return byType(pages, 'quest').flatMap((q) => [
+    ...((q.data.leads_to ?? []) as Row[]).flatMap((r) => (r.ref && pages[r.ref] ? [{ from: q.data.id, to: r.ref, kind: 'leads' as const }] : [])),
+    ...branches(q.body, s.branches).flatMap((b) => b.targets.filter((t) => pages[t]).map((to) => ({ from: q.data.id, to, kind: 'payoff' as const, line: b.line, condition: b.condition }))),
+  ])
 }
 
 /** The cast matrix glyphs for one character in one quest; "?" when every mention has a condition. */
@@ -75,7 +85,10 @@ export function issues(s: Schema, pages: Pages, imported: string[] = []): Issue[
     if (q.data.status === 'cut') continue
     if (q.data.engine?.id) qids.set(q.data.engine.id, [...(qids.get(q.data.engine.id) ?? []), q.data.id])
     if (giver && q.data.status !== 'idea' && !(q.data[giver.key] ?? []).length) out.push({ kind: `No ${giver.label.toLowerCase()}`, text: `${label(pages, q.data.id)} has no ${giver.label.toLowerCase()}`, id: q.data.id })
-    for (const b of branches(q.body, s.branches)) if (/unplaced/i.test(b.payoff)) out.push({ kind: 'Unplaced payoff', text: `${label(pages, q.data.id)}: “${b.condition}” pays off somewhere not yet placed`, id: q.data.id })
+    const rows = branches(q.body, s.branches).filter((b) => b.condition)
+    for (const b of rows) if (/unplaced/i.test(b.payoff)) out.push({ kind: 'Unplaced payoff', text: `${label(pages, q.data.id)}: “${b.condition}” pays off somewhere not yet placed`, id: q.data.id })
+    const open = rows.filter((b) => !b.payoff.trim()).length
+    if (open && (q.data.status === 'review' || q.data.status === 'ready')) out.push({ kind: 'Outcome with no payoff', text: `${label(pages, q.data.id)} has ${open} branch outcome${open > 1 ? 's' : ''} that pay${open > 1 ? '' : 's'} off nowhere`, id: q.data.id })
     if (q.data.status === 'ready') { const c = completeness(s, q); if (c.missing.length) out.push({ kind: 'Ready but incomplete', text: `${label(pages, q.data.id)} is missing ${c.missing.join(', ')}`, id: q.data.id }) }
   }
   const engine = s.engine?.name ?? 'engine'

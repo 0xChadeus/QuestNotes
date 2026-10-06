@@ -7,7 +7,8 @@ module.exports = {
   directories: { output: 'release' },
   files: ['out/**'],
   asarUnpack: ['node_modules/dugite/git/**'],
-  extraResources: [{ from: 'bridge', to: 'bridge' }],
+  // elkjs (EPL-2.0) is bundled into the window's code unmodified; its licence travels with the app.
+  extraResources: [{ from: 'bridge', to: 'bridge' }, { from: 'node_modules/elkjs/LICENSE.md', to: 'licenses/elkjs-LICENSE.md' }],
   linux: { target: 'AppImage', category: 'Office', syncDesktopName: true },
   win: { target: 'nsis' },
   mac: { target: 'dmg' },

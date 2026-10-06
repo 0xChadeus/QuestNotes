@@ -1,21 +1,22 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell, type IpcMainInvokeEvent } from 'electron'
 import { autoUpdater } from 'electron-updater'
-import { readFile } from 'node:fs/promises'
+import { readFile, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
-import type { FSWatcher } from 'node:fs'
 import { Workspace } from './workspace'
 import * as git from './git'
 import * as settings from './settings'
 import { Bridge, findGodot, scan, watchGame } from './engine'
 import { describe, importDocs, suggest } from './importer'
 import type { EngineIndex } from '../shared/engine'
-import type { Events, Invoke, Project } from '../shared/api'
+import type { Events, Invoke, MapView, Project } from '../shared/api'
+import { migrateMap } from '../shared/map'
+import type { Page } from '../shared/page'
 
 let win: BrowserWindow | undefined
 let ws: Workspace | undefined
 let bridge: Bridge | undefined
-let gameWatch: FSWatcher[] = []
+let gameWatch: { close(): void }[] = []
 let engine: EngineIndex | null = null
 let docs: { name: string; data: Uint8Array }[] = []
 const SNAPSHOT = 'engine/index.yaml'
@@ -52,33 +53,53 @@ async function connectGame(game: string | undefined) {
 }
 
 async function openProject(root: string): Promise<Project> {
+  if (!existsSync(root)) { settings.update((s) => { s.recent = s.recent.filter((r) => r !== root) }); throw new Error('That folder no longer exists.') }
   ws?.close()
   ws = new Workspace(root)
-  settings.remember(root)
   await ws.loadConfig()
   const { pages, errors } = await ws.loadAll()
   ws.watch((file, page) => send('page:changed', file, page))
   const s = settings.load()
   await connectGame(s.games[root])
   for (const p of pages) for (const w of p.data.title.split(/[\s,.’'-]+/)) if (w.length > 2) win?.webContents.session.addWordToSpellCheckerDictionary(w)
+  settings.remember(root)
   return {
-    root, config: ws.config, pages, errors, map: (await ws.readYaml('views/map.yaml')) ?? {}, git: await git.status(root),
+    root, config: ws.config, pages, errors, trashed: (await ws.trashed()).map((p) => p.data.id), map: await loadMap(pages), git: await git.status(root),
     engine, bridge: bridge!.state, game: s.games[root], godot: s.godot ?? findGodot(), issues: (await ws.readYaml('views/issues.yaml'))?.open ?? [],
   }
+}
+
+/** The map file, converted once from the version 1 grid; the conversion is the one write that happens on open. */
+async function loadMap(pages: Page[]) {
+  const map: MapView = (await need().readYaml('views/map.yaml')) ?? {}
+  if (map.version === 2) return map
+  const next = migrateMap(pages.map((p) => p.data), map)
+  await need().writeYaml('views/map.yaml', next)
+  return next
 }
 
 const pick = async (title: string, props: ('openDirectory' | 'openFile' | 'multiSelections' | 'createDirectory')[], filters?: Electron.FileFilter[]) =>
   (await dialog.showOpenDialog(win!, { title, properties: props, filters })).filePaths
 
-handle('app:recent', () => settings.load().recent)
+handle('app:recent', () => settings.load().recent.filter((r) => existsSync(r)))
+// There is no menu bar on Linux and Windows, so the window asks for zoom itself (Ctrl +, Ctrl −, Ctrl 0); the level is kept.
+handle('app:zoom', (step) => {
+  const z = step ? Math.max(-3, Math.min(4, win!.webContents.getZoomLevel() + step * 0.5)) : 0
+  win!.webContents.setZoomLevel(z)
+  settings.update((s) => { s.zoom = z })
+  return z
+})
+handle('app:forget', (root) => settings.update((s) => { s.recent = s.recent.filter((r) => r !== root) }).recent)
 handle('app:pickFolder', async (title) => (await pick(title, ['openDirectory', 'createDirectory']))[0] ?? null)
 handle('project:create', async (root, name) => { await Workspace.create(root, name); await git.init(root).catch(() => {}); return openProject(root) })
 handle('project:open', openProject)
 handle('page:write', (p) => need().write(p))
 handle('page:trash', (f) => need().trash(f))
-handle('page:restore', (f) => need().restore(f))
+handle('page:restore', (f, to) => need().restore(f, to))
+handle('page:delete', (f) => need().remove(f))
 handle('trash:list', () => need().trashed())
 handle('trash:empty', () => need().emptyTrash())
+handle('trash:delete', (f) => need().removeTrashed(f))
 handle('view:write', (name, view) => need().writeYaml(`views/${name}.yaml`, view))
 handle('git:status', () => git.status(need().root))
 handle('git:init', async () => { await git.init(need().root); return git.status(need().root) })
@@ -120,6 +141,16 @@ handle('import:commit', async (pages, jobs) => {
   return need().config
 })
 handle('shell:open', async (file) => { await shell.openPath(need().abs(file)) })
+handle('canvas:save', async (text, name) => {
+  const r = await dialog.showSaveDialog(win!, { title: 'Export the map as JSON Canvas', defaultPath: `${name}.canvas`, filters: [{ name: 'JSON Canvas', extensions: ['canvas'] }] })
+  if (r.canceled || !r.filePath) return null
+  await writeFile(r.filePath, text)
+  return r.filePath
+})
+handle('canvas:open', async () => {
+  const [file] = await pick('Import a JSON Canvas layout', ['openFile'], [{ name: 'JSON Canvas', extensions: ['canvas'] }])
+  return file ? readFile(file, 'utf8') : null
+})
 handle('shell:addon', async () => { await shell.openPath(path.join(app.isPackaged ? process.resourcesPath : app.getAppPath(), 'bridge/addons')) })
 
 function createWindow() {
@@ -128,6 +159,17 @@ function createWindow() {
     webPreferences: { preload: path.join(__dirname, '../preload/index.js'), sandbox: true, contextIsolation: true, spellcheck: true },
   })
   win.once('ready-to-show', () => win!.show())
+  // Closing waits for the window to write what is still pending (text typed a moment ago), a few seconds at most.
+  let closing = false
+  win.on('close', (e) => {
+    if (closing || win!.webContents.isCrashed()) return
+    e.preventDefault()
+    send('app:closing')
+    setTimeout(() => { closing = true; win?.close() }, 4000)
+  })
+  ipcMain.removeHandler('app:closed')
+  handle('app:closed', () => { closing = true; setImmediate(() => win?.close()) })
+  win.webContents.on('did-finish-load', () => win!.webContents.setZoomLevel(settings.load().zoom ?? 0))
   win.webContents.setWindowOpenHandler(({ url }) => { if (/^https?:/.test(url)) shell.openExternal(url); return { action: 'deny' } })
   win.webContents.on('will-navigate', (e) => e.preventDefault())
   win.webContents.on('context-menu', (_e, p) => {

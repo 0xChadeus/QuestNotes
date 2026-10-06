@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { addPayoff, branches, parsePage, refsOf, writePage, writeYaml } from '../src/shared/page'
+import { addPayoff, branches, parsePage, refsOf, removePayoff, writePage, writeYaml } from '../src/shared/page'
 import { parse } from 'yaml'
 import { mergeText } from '../src/shared/merge'
 import { questState, resolveEngine, type EngineIndex } from '../src/shared/engine'
@@ -43,6 +43,9 @@ describe('page files', () => {
     expect(b.map((r) => r.targets)).toEqual([['q_mq03'], []])
     expect(addPayoff(p.body, b[1].line, 'fa_tide_guild')).toContain('| Player tells the Guild | Mara\'s trust drops | [[fa_tide_guild]] |')
     expect(branches(p.body, 'Choices')).toEqual([])
+    const linked = addPayoff(addPayoff(p.body, b[1].line, 'fa_tide_guild'), b[1].line, 'q_mq05')
+    expect(removePayoff(linked, b[1].line, 'fa_tide_guild')).toContain('| Player tells the Guild | Mara\'s trust drops | [[q_mq05]] |')
+    expect(removePayoff(p.body, b[0].line, 'q_mq03')).toBe(p.body.replace('[[q_mq03]]', ''))
   })
 })
 

@@ -1,5 +1,5 @@
 // The lore folder: questnotes.yaml, one Markdown page per entity, atomic saves, and a watcher that ignores the app's own writes.
-import { promises as fs, watch, type FSWatcher } from 'node:fs'
+import { promises as fs, existsSync, watch, type FSWatcher } from 'node:fs'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { parse } from 'yaml'
@@ -12,7 +12,7 @@ export class Workspace {
   config: ProjectConfig = {}
   schema: Schema = resolveSchema()
   private own = new Map<string, string>()
-  private watcher?: FSWatcher
+  private watchers = new Map<string, FSWatcher>()
   private pending = new Map<string, NodeJS.Timeout>()
   constructor(readonly root: string) {}
 
@@ -33,14 +33,21 @@ export class Workspace {
   }
 
   private dirs = () => this.schema.kinds.map((k) => k.dir)
+  private byDir = () => Object.fromEntries(this.schema.kinds.map((k) => [k.dir, k.id]))
   async loadAll() {
     const pages: Page[] = []
     const errors: { file: string; error: string }[] = []
     for (const dir of this.dirs()) {
       for (const n of (await fs.readdir(this.abs(dir)).catch(() => [] as string[])).filter((n) => n.endsWith('.md'))) {
         const file = `${dir}/${n}`
-        try { pages.push(parsePage(await fs.readFile(this.abs(file), 'utf8'), file)) } catch (e) { errors.push({ file, error: String(e) }) }
+        try { pages.push(parsePage(await fs.readFile(this.abs(file), 'utf8'), file, this.byDir())) } catch (e) { errors.push({ file, error: String(e) }) }
       }
+    }
+    // Pages in a folder no kind uses (a kind removed from questnotes.yaml, say) would otherwise vanish without a word.
+    for (const e of await fs.readdir(this.root, { withFileTypes: true }).catch(() => [])) {
+      if (!e.isDirectory() || e.name.startsWith('.') || ['trash', 'views', 'engine', ...this.dirs()].includes(e.name)) continue
+      const n = (await fs.readdir(this.abs(e.name)).catch(() => [] as string[])).filter((x) => x.endsWith('.md')).length
+      if (n) errors.push({ file: `${e.name}/`, error: `${n} page${n > 1 ? 's are' : ' is'} hidden: no kind in questnotes.yaml uses the folder “${e.name}”` })
     }
     return { pages, errors }
   }
@@ -55,39 +62,60 @@ export class Workspace {
   }
   write = (p: Page) => this.writeText(p.file, writePage(p.data, p.body))
 
+  /** Moves a file, never over another one. */
   async move(from: string, to: string) {
+    if (await fs.access(this.abs(to)).then(() => true, () => false)) throw new Error(`${to} already exists`)
     await fs.mkdir(path.dirname(this.abs(to)), { recursive: true })
     this.own.set(from, 'gone')
     await fs.rename(this.abs(from), this.abs(to))
   }
-  trash = (file: string) => this.move(file, `trash/${file}`)
-  restore = (file: string) => this.move(`trash/${file}`, file)
+  /** Moves a page to the Trash and says where it went: a second page with the same name gets a ~2, ~3… so both are kept. */
+  async trash(file: string) {
+    let to = file
+    for (let n = 2; await fs.access(this.abs(`trash/${to}`)).then(() => true, () => false); n++) to = file.replace(/\.md$/, `~${n}.md`)
+    await this.move(file, `trash/${to}`)
+    return to
+  }
+  /** Puts a page back from the Trash under its own name; refuses when a live page has that name. */
+  restore = (trashed: string, to = trashed.replace(/~\d+\.md$/, '.md')) => this.move(`trash/${trashed}`, to)
   async trashed() {
     const out: Page[] = []
     for (const dir of this.dirs()) for (const n of await fs.readdir(this.abs(`trash/${dir}`)).catch(() => [] as string[]))
-      try { out.push(parsePage(await fs.readFile(this.abs(`trash/${dir}/${n}`), 'utf8'), `${dir}/${n}`)) } catch { /* skip */ }
+      try { out.push(parsePage(await fs.readFile(this.abs(`trash/${dir}/${n}`), 'utf8'), `${dir}/${n}`, this.byDir())) } catch { /* skip */ }
     return out
   }
   emptyTrash = () => fs.rm(this.abs('trash'), { recursive: true, force: true })
+  /** Deletes a page for good: a page created and then undone, or one picked from the Trash. */
+  async remove(file: string) { this.own.set(file, 'gone'); await fs.rm(this.abs(file), { force: true }) }
+  removeTrashed = (file: string) => fs.rm(this.abs(`trash/${file}`), { force: true })
 
   async readYaml(file: string) { try { return parse(await fs.readFile(this.abs(file), 'utf8')) } catch { return null } }
   writeYaml = (file: string, obj: object) => this.writeText(file, writeYaml(obj))
 
-  /** Reports page files changed by anything other than this app: git, an external editor, another tool. */
+  /** Reports page files changed by anything other than this app: git, an external editor, another tool. One watcher per page
+   *  folder: Node's recursive watching on Linux loses a file once it is replaced by a rename, which is how this app and git write. */
   watch(onChange: (file: string, page: Page | null) => void) {
-    this.watcher = watch(this.root, { recursive: true }, (_e, f) => {
-      const file = f?.toString().replace(/\\/g, '/')
-      if (!file?.endsWith('.md') || !this.dirs().includes(file.split('/')[0]) || file.split('/').length !== 2) return
-      clearTimeout(this.pending.get(file))
-      this.pending.set(file, setTimeout(async () => {
-        const text = await fs.readFile(this.abs(file), 'utf8').catch(() => null)
-        if (text === null) { if (this.own.get(file) !== 'gone') onChange(file, null); return }
-        if (this.own.get(file) === hash(text)) return
-        this.own.set(file, hash(text))
-        try { onChange(file, parsePage(text, file)) } catch { /* half-written file; the next event will read it */ }
-      }, 120))
-    })
+    const attach = (dir: string) => {
+      this.watchers.get(dir)?.close()
+      this.watchers.delete(dir)
+      if (!existsSync(this.abs(dir))) return
+      this.watchers.set(dir, watch(this.abs(dir), (_e, n) => { const name = n?.toString(); if (name?.endsWith('.md')) this.changed(`${dir}/${name}`, onChange) })
+        .on('error', () => this.watchers.delete(dir)))
+    }
+    this.dirs().forEach(attach)
+    // A page folder that appears later (the first character, say) is watched from then on; none is created just to watch it.
+    this.watchers.set('', watch(this.root, (_e, n) => { const d = n?.toString(); if (d && this.dirs().includes(d)) attach(d) }).on('error', () => {}))
   }
-  close() { this.watcher?.close() }
+  private changed(file: string, onChange: (file: string, page: Page | null) => void) {
+    clearTimeout(this.pending.get(file))
+    this.pending.set(file, setTimeout(async () => {
+      const text = await fs.readFile(this.abs(file), 'utf8').catch(() => null)
+      if (text === null) { if (this.own.get(file) !== 'gone') onChange(file, null); return }
+      if (this.own.get(file) === hash(text)) return
+      this.own.set(file, hash(text))
+      try { onChange(file, parsePage(text, file, this.byDir())) } catch { /* half-written file; the next event will read it */ }
+    }, 120))
+  }
+  close() { this.watchers.forEach((w) => w.close()); this.watchers.clear() }
   abs = (file: string) => path.join(this.root, file)
 }

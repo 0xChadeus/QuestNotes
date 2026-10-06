@@ -1,26 +1,37 @@
 # QuestNotes
 
 A desktop app for designing branching quests in story terms. Quest designers work with quests, the people who give
-them, the places and factions they touch and what they reveal, not with engine data. A master map shows every quest by
-act and questline, each card opens a detailed page, and tables cover the cast and anything else the project tracks. A
+them, the places and factions they touch and what they reveal, not with engine data. A free-form map shows every quest
+where the designer put it, each card opens a detailed page, and tables cover the cast and anything else the project tracks. A
 light link to the game's quest system shows which quests exist in the engine and opens them there. Quests are ported
 into the engine by hand; QuestNotes never writes to the game project.
 
 ## Use
 
-- **Map.** Acts and their sub-sections are columns, questlines are rows; a card's cell is its act and questline. Drag a
-  card to move it, drag from its right edge to another card to add *Leads to* or a *Pays off* link from a branch row,
-  drop on empty canvas to create a connected quest, double-click empty canvas to add one. Quests with no act wait in the
-  Hooks tray. Zooming out shrinks cards to their codes. Click any chip to filter; nothing moves when you filter.
+- **Map.** One free canvas: a card stays where you put it, and nothing else moves it. Its act shows as the colour of
+  its top edge, its questline as a badge; neither decides where it sits. Drag on empty canvas to select a box of cards,
+  drag cards to move them (they snap to a 20 px grid and line up with their neighbours; hold Alt to place freely), and
+  nudge them with the arrow keys. Drag from a card's right edge to another card to add *Leads to* or a *Pays off* link
+  from a branch row, or onto empty canvas to create a connected quest; drag a link's end to reconnect it.
+  Double-click empty canvas to add a quest.
+- **Frames and notes.** Ctrl+G draws a frame around the selected cards; dragging a frame by its name carries the cards
+  inside it. Notes are text on the canvas. *Tidy* lays out a selection left to right (ELK), keeping its rough order;
+  every arrangement is one undo step. Quests not on the map wait in the Hooks tray: drag one out, or *Place all*.
+  Scroll to pan, Ctrl+scroll to zoom; zoomed out, cards shrink to their codes. Filters dim cards and never move them.
 - **Pages** open beside the map (Space) or full (Enter). In the text, `@` or `[[` links a page and `/` inserts a
-  heading, list or table. Everything saves as you go; deleted pages go to the Trash.
+  heading, list or table; inside a table, a toolbar adds and deletes rows and columns. Everything saves as you go.
+- **Right-click** anything (a card, a link, a frame, a note, a list row, a hook) for what you can do to it: open, set
+  status, rename, duplicate, align, move, delete. Ctrl-click or Shift-click picks several cards or rows to change or delete together.
+- **Undo.** Ctrl+Z and Ctrl+Shift+Z undo and redo every change: fields, status, moves, links, new and deleted pages.
+  Deleted pages go to the Trash, where they can be read, restored or deleted for good.
 - **Cast, Handoff, Issues** and the project's own matrix are in the sidebar. `Ctrl K` finds any page or command; `?`
   lists the shortcuts.
 - **Engine link.** When the project names an engine, choose the game folder in Settings: QuestNotes reads the engine's
   quest files and shows on every quest whether it exists there. A quest marked *Ready for engine* with no engine quest
   gets an amber flag and appears under Handoff with a brief for whoever builds it.
 - **Sync** shares the lore folder through git: one button commits, fetches, merges and pushes. Edits to different lines
-  merge on their own; edits to the same line come back to choose.
+  merge on their own; edits to the same line come back to choose. The map merges card by card and never asks.
+- **JSON Canvas.** The map exports to, and imports layouts from, the open JSON Canvas format that Obsidian Canvas uses.
 
 ## Projects
 
@@ -100,7 +111,7 @@ One Markdown file per page with a YAML header, in its own git repository, separa
 ```
 questnotes.yaml        project settings
 quests/ questlines/ acts/ and one folder per kind (characters/, factions/, …)
-views/map.yaml         order of cards inside each map cell
+views/map.yaml         where each card, frame and note sits: one line each, merged by id when syncing
 views/issues.yaml      import issues not yet settled
 engine/index.yaml      last scan of the engine
 trash/
